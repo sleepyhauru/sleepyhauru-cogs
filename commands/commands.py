@@ -13,6 +13,30 @@ class Commands(commands.Cog):
         "Birthday",
     ]
 
+    INCLUDED_COMMANDS = {
+        "EmojiSteal": {
+            "getemoji",
+            "steal",
+            "steal upload",
+            "uploadsticker",
+        },
+        "Deepfry": {
+            "deepfry",
+            "nuke",
+        },
+        "AddImage": {
+            "addimage add",
+            "addimage delete",
+            "addimage list",
+        },
+        "Birthday": {
+            "birthday",
+            "birthday set",
+            "birthday remove",
+            "birthday upcoming",
+        },
+    }
+
     def __init__(self, bot):
         self.bot = bot
 
@@ -59,6 +83,10 @@ class Commands(commands.Cog):
             return f"**`{usage}`** — {desc}"
         return f"**`{usage}`**"
 
+    def _is_included(self, cog_name: str, command: commands.Command) -> bool:
+        allowed = self.INCLUDED_COMMANDS.get(cog_name, set())
+        return command.qualified_name in allowed
+
     def _build_cog_lines(self, prefix: str, cog_name: str) -> List[str]:
         lines: List[str] = []
         seen: Set[str] = set()
@@ -66,17 +94,16 @@ class Commands(commands.Cog):
         root_commands = self._visible_root_commands_for_cog(cog_name)
 
         for root in root_commands:
-            if root.qualified_name in seen:
-                continue
+            all_commands = [root] + self._walk_visible_subcommands(root)
 
-            seen.add(root.qualified_name)
-            lines.append(self._format_command_line(prefix, root))
-
-            for sub in self._walk_visible_subcommands(root):
-                if sub.qualified_name in seen:
+            for cmd in all_commands:
+                if cmd.qualified_name in seen:
                     continue
-                seen.add(sub.qualified_name)
-                lines.append(self._format_command_line(prefix, sub))
+                if not self._is_included(cog_name, cmd):
+                    continue
+
+                seen.add(cmd.qualified_name)
+                lines.append(self._format_command_line(prefix, cmd))
 
         return lines
 
@@ -88,7 +115,6 @@ class Commands(commands.Cog):
         else:
             description = "\n".join(lines)
 
-        # Discord embed description limit is 4096
         if len(description) > 4096:
             trimmed_lines = []
             total_len = 0
