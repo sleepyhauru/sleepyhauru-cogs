@@ -1,6 +1,50 @@
 import discord
+from discord.ui import Select, View
 from redbot.core import commands
 from typing import List, Set
+
+
+class CommandsMenuSelect(Select):
+    def __init__(self, cog_names: List[str]):
+        options = [
+            discord.SelectOption(label=cog_name, value=cog_name)
+            for cog_name in cog_names
+        ]
+        super().__init__(
+            placeholder="Select a cog...",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view is None or not isinstance(view, CommandsMenuView):
+            return
+
+        if interaction.user.id != view.author_id:
+            await interaction.response.send_message(
+                "You can't use this menu.",
+                ephemeral=True,
+            )
+            return
+
+        cog_name = self.values[0]
+        embed = view.cog.build_cog_embed(view.prefix, cog_name)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class CommandsMenuView(View):
+    def __init__(self, cog, author_id: int, prefix: str, cog_names: List[str]):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.author_id = author_id
+        self.prefix = prefix
+        self.add_item(CommandsMenuSelect(cog_names))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 class Commands(commands.Cog):
@@ -71,10 +115,7 @@ class Commands(commands.Cog):
 
     def _command_description(self, command: commands.Command) -> str:
         text = command.short_doc or command.help or ""
-        text = " ".join(text.split())
-        if len(text) > 90:
-            text = text[:87].rstrip() + "..."
-        return text
+        return " ".join(text.split())
 
     def _format_command_line(self, prefix: str, command: commands.Command) -> str:
         usage = self._command_usage(prefix, command)
@@ -107,7 +148,7 @@ class Commands(commands.Cog):
 
         return lines
 
-    def _build_cog_embed(self, prefix: str, cog_name: str, index: int, total: int) -> discord.Embed:
+    def build_cog_embed(self, prefix: str, cog_name: str) -> discord.Embed:
         lines = self._build_cog_lines(prefix, cog_name)
 
         if not lines:
@@ -128,26 +169,22 @@ class Commands(commands.Cog):
             description = "\n".join(trimmed_lines)
 
         embed = discord.Embed(
-            title=f"{cog_name}",
+            title=f"Bot Commands — {cog_name}",
             description=description,
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text=f"Use {prefix}help <command> for detailed help • Page {index}/{total}")
+        embed.set_footer(text=f"Use {prefix}help <command> for detailed help.")
         return embed
-
-    def build_embeds(self, prefix: str) -> List[discord.Embed]:
-        embeds = []
-        total = len(self.TARGET_COGS)
-
-        for index, cog_name in enumerate(self.TARGET_COGS, start=1):
-            embeds.append(self._build_cog_embed(prefix, cog_name, index, total))
-
-        return embeds
 
     @commands.command(name="commands", aliases=["cmds", "helpmenu", "clanhelp"])
     async def commands_menu(self, ctx: commands.Context):
         """Show the command list."""
-        embeds = self.build_embeds(ctx.clean_prefix)
-
-        for embed in embeds:
-            await ctx.send(embed=embed)
+        first_cog = self.TARGET_COGS[0]
+        embed = self.build_cog_embed(ctx.clean_prefix, first_cog)
+        view = CommandsMenuView(
+            cog=self,
+            author_id=ctx.author.id,
+            prefix=ctx.clean_prefix,
+            cog_names=self.TARGET_COGS,
+        )
+        await ctx.send(embed=embed, view=view)
