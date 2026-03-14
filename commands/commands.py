@@ -1,6 +1,6 @@
 import discord
 from redbot.core import commands
-from typing import Dict, List, Set
+from typing import List, Set
 
 
 class Commands(commands.Cog):
@@ -12,51 +12,6 @@ class Commands(commands.Cog):
         "AddImage",
         "Birthday",
     ]
-
-    PERMISSION_MARKERS: Dict[str, str] = {
-        "steal": "🔓",
-        "steal upload": "😀🤖",
-        "getemoji": "🔓",
-        "uploadsticker": "😀🤖",
-
-        "deepfry": "🤖",
-        "df": "🤖",
-        "nuke": "🤖",
-        "deepfryset": "🏠",
-        "deepfryset frychance": "🏠",
-        "deepfryset nukechance": "🏠",
-        "deepfryset allowalltypes": "🏠",
-        "deepfryset replyonly": "🏠",
-        "deepfryset debug": "🏠",
-
-        "addimage": "🛡️",
-        "addimage add": "🛡️🤖",
-        "addimage list": "🔓🤖",
-        "addimage ignoreglobal": "🛡️",
-        "addimage delete": "🛡️",
-        "addimage clear_images": "🛡️",
-        "addimage clean_deleted_images": "🛡️",
-        "addimage deleteglobal": "⚙️",
-        "addimage clear_global": "⚙️",
-        "addimage deleteallbyuser": "⚙️",
-
-        "birthday": "🔓",
-        "birthday set": "🔓",
-        "birthday remove": "🔓",
-        "birthday upcoming": "🔓",
-        "bday": "🔓",
-
-        "bdset": "👑",
-        "bdset interactive": "👑🤖",
-        "bdset settings": "👑",
-        "bdset time": "👑",
-        "bdset msgwithoutyear": "👑",
-        "bdset msgwithyear": "👑",
-        "bdset forceset": "👑",
-        "bdset forceremove": "👑",
-
-        "birthdaydebug": "⚙️",
-    }
 
     def __init__(self, bot):
         self.bot = bot
@@ -71,6 +26,7 @@ class Commands(commands.Cog):
             if cmd.parent is not None:
                 continue
             cmds.append(cmd)
+
         return sorted(cmds, key=lambda c: c.name.lower())
 
     def _walk_visible_subcommands(self, command: commands.Command) -> List[commands.Command]:
@@ -80,36 +36,37 @@ class Commands(commands.Cog):
                 if sub.hidden:
                     continue
                 found.append(sub)
+
                 if isinstance(sub, commands.Group):
                     found.extend(self._walk_visible_subcommands(sub))
+
         return found
 
-    def _command_signature(self, prefix: str, command: commands.Command) -> str:
-        full = f"{prefix}{command.qualified_name}"
-        if command.signature:
-            return f"`{full} {command.signature}`"
-        return f"`{full}`"
+    def _command_usage(self, prefix: str, command: commands.Command) -> str:
+        base = f"{prefix}{command.qualified_name}"
 
-    def _command_help_text(self, command: commands.Command) -> str:
-        text = command.short_doc or command.help or "No description provided."
+        if command.signature:
+            return f"{base} {command.signature}"
+
+        return base
+
+    def _command_description(self, command: commands.Command) -> str:
+        text = command.short_doc or command.help or ""
         text = " ".join(text.split())
-        if len(text) > 110:
-            text = text[:107].rstrip() + "..."
+
+        if len(text) > 90:
+            text = text[:87] + "..."
+
         return text
 
-    def _permission_marker(self, command: commands.Command) -> str:
-        qn = command.qualified_name.lower()
-        if qn in self.PERMISSION_MARKERS:
-            return self.PERMISSION_MARKERS[qn]
-
-        root = command.root_parent.name.lower() if command.root_parent else command.name.lower()
-        return self.PERMISSION_MARKERS.get(root, "🔓")
-
     def _format_command_line(self, prefix: str, command: commands.Command) -> str:
-        marker = self._permission_marker(command)
-        usage = self._command_signature(prefix, command)
-        desc = self._command_help_text(command)
-        return f"{marker} {usage} — {desc}"
+        usage = self._command_usage(prefix, command)
+        desc = self._command_description(command)
+
+        if desc:
+            return f"**`{usage}`** — {desc}"
+
+        return f"**`{usage}`**"
 
     def _build_cog_section(self, prefix: str, cog_name: str) -> str:
         lines: List[str] = []
@@ -120,12 +77,14 @@ class Commands(commands.Cog):
         for root in root_commands:
             if root.qualified_name in seen:
                 continue
+
             seen.add(root.qualified_name)
             lines.append(self._format_command_line(prefix, root))
 
             for sub in self._walk_visible_subcommands(root):
                 if sub.qualified_name in seen:
                     continue
+
                 seen.add(sub.qualified_name)
                 lines.append(self._format_command_line(prefix, sub))
 
@@ -142,30 +101,24 @@ class Commands(commands.Cog):
     def build_embed(self, prefix: str) -> discord.Embed:
         embed = discord.Embed(
             title="Bot Commands",
-            description=(
-                f"Use `{prefix}help <command>` for more detail.\n\n"
-                "**Permission Markers**\n"
-                "🔓 Everyone\n"
-                "🛡️ Mod\n"
-                "👑 Admin\n"
-                "🏠 Guild Owner\n"
-                "⚙️ Bot Owner\n"
-                "😀 Manage Emojis\n"
-                "🤖 Bot permissions required"
-            ),
+            description=f"Use `{prefix}help <command>` for detailed help.",
             color=discord.Color.blurple(),
         )
 
         for cog_name in self.TARGET_COGS:
             section = self._build_cog_section(prefix, cog_name)
-            embed.add_field(name=cog_name, value=section, inline=False)
+            embed.add_field(
+                name=cog_name,
+                value=section,
+                inline=False,
+            )
 
-        embed.set_footer(text="Auto-detected commands")
+        embed.set_footer(text="Command list")
         return embed
 
-    @commands.command(name="commands", aliases=["cmds", "clanhelp", "helpmenu"])
+    @commands.command(name="commands", aliases=["cmds", "helpmenu", "clanhelp"])
     async def commands_menu(self, ctx: commands.Context):
-        """Show the embedded command list."""
+        """Show the command list."""
         embed = self.build_embed(ctx.clean_prefix)
         await ctx.send(embed=embed)
 
