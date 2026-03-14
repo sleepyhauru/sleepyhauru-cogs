@@ -1,15 +1,14 @@
 {
     "author": ["sleepyhauru"],
-    "install_msg": "Thanks for installing the Custom Commands Menu! Use `[p]commands` to view the embedded command list.",
+    "install_msg": "Thanks for installing the commands menu! Use `[p]commands` to view the command list.",
     "name": "commands",
     "short": "Embedded command list for selected cogs.",
-    "description": "Provides a single embedded command menu showing categorized commands for specific installed cogs such as EmojiSteal, Deepfry, AddImage, and Birthday. Designed as a cleaner alternative to the default help command for servers.",
+    "description": "Provides a single embedded command menu showing categorized commands for selected installed cogs.",
     "tags": [
         "utility",
         "help",
         "commands",
-        "menu",
-        "discord"
+        "menu"
     ],
     "requirements": [],
     "hidden": false,
@@ -17,5 +16,5 @@
     "type": "COG",
     "min_bot_version": "3.5.0",
     "min_python_version": [3, 8, 0],
-    "end_user_data_statement": "This cog does not store any user data."
+    "end_user_data_statement": "This cog does not store user data."
 }

@@ -1,12 +1,130 @@
 import discord
 from redbot.core import commands
+from typing import Dict, List, Set
 
 
-class CustomCommandsHelp(commands.Cog):
-    """Custom embedded command list for selected cogs."""
+class Commands(commands.Cog):
+    """Embedded command list for selected cogs."""
+
+    TARGET_COGS = [
+        "EmojiSteal",
+        "Deepfry",
+        "AddImage",
+        "Birthday",
+    ]
+
+    PERMISSION_MARKERS: Dict[str, str] = {
+        "steal": "🔓",
+        "steal upload": "😀🤖",
+        "getemoji": "🔓",
+        "uploadsticker": "😀🤖",
+
+        "deepfry": "🤖",
+        "df": "🤖",
+        "nuke": "🤖",
+        "deepfryset": "🏠",
+        "deepfryset frychance": "🏠",
+        "deepfryset nukechance": "🏠",
+
+        "addimage": "🛡️",
+        "addimage add": "🛡️🤖",
+        "addimage list": "🔓🤖",
+        "addimage delete": "🛡️",
+        "addimage clear_images": "🛡️",
+        "addimage clean_deleted_images": "🛡️",
+        "addimage deleteglobal": "⚙️",
+        "addimage clear_global": "⚙️",
+        "addimage deleteallbyuser": "⚙️",
+
+        "birthday": "🔓",
+        "birthday set": "🔓",
+        "birthday remove": "🔓",
+        "birthday upcoming": "🔓",
+        "bday": "🔓",
+
+        "bdset": "👑",
+        "bdset interactive": "👑🤖",
+        "bdset settings": "👑",
+        "bdset time": "👑",
+    }
 
     def __init__(self, bot):
         self.bot = bot
+
+    def _visible_root_commands_for_cog(self, cog_name: str) -> List[commands.Command]:
+        cmds = []
+        for cmd in self.bot.commands.values():
+            if cmd.cog_name != cog_name:
+                continue
+            if cmd.hidden:
+                continue
+            if cmd.parent is not None:
+                continue
+            cmds.append(cmd)
+        return sorted(cmds, key=lambda c: c.name.lower())
+
+    def _walk_visible_subcommands(self, command: commands.Command) -> List[commands.Command]:
+        found = []
+        if isinstance(command, commands.Group):
+            for sub in sorted(command.commands, key=lambda c: c.name.lower()):
+                if sub.hidden:
+                    continue
+                found.append(sub)
+                if isinstance(sub, commands.Group):
+                    found.extend(self._walk_visible_subcommands(sub))
+        return found
+
+    def _command_signature(self, prefix: str, command: commands.Command) -> str:
+        full = f"{prefix}{command.qualified_name}"
+        if command.signature:
+            return f"`{full} {command.signature}`"
+        return f"`{full}`"
+
+    def _command_help_text(self, command: commands.Command) -> str:
+        text = command.short_doc or command.help or "No description provided."
+        text = " ".join(text.split())
+        if len(text) > 110:
+            text = text[:107].rstrip() + "..."
+        return text
+
+    def _permission_marker(self, command: commands.Command) -> str:
+        qn = command.qualified_name.lower()
+        if qn in self.PERMISSION_MARKERS:
+            return self.PERMISSION_MARKERS[qn]
+
+        root = command.root_parent.name.lower() if command.root_parent else command.name.lower()
+        return self.PERMISSION_MARKERS.get(root, "🔓")
+
+    def _format_command_line(self, prefix: str, command: commands.Command) -> str:
+        marker = self._permission_marker(command)
+        usage = self._command_signature(prefix, command)
+        desc = self._command_help_text(command)
+        return f"{marker} {usage} — {desc}"
+
+    def _build_cog_section(self, prefix: str, cog_name: str) -> str:
+        lines: List[str] = []
+        seen: Set[str] = set()
+
+        root_commands = self._visible_root_commands_for_cog(cog_name)
+
+        for root in root_commands:
+            if root.qualified_name in seen:
+                continue
+            seen.add(root.qualified_name)
+            lines.append(self._format_command_line(prefix, root))
+
+            for sub in self._walk_visible_subcommands(root):
+                if sub.qualified_name in seen:
+                    continue
+                seen.add(sub.qualified_name)
+                lines.append(self._format_command_line(prefix, sub))
+
+        text = "\n".join(lines)
+
+        if len(text) > 1024:
+            text = text[:1000] + "\n..."
+
+        return text or "No commands detected."
 
     def build_embed(self, prefix: str) -> discord.Embed:
         embed = discord.Embed(
@@ -15,91 +133,29 @@ class CustomCommandsHelp(commands.Cog):
                 f"Use `{prefix}help <command>` for more detail.\n\n"
                 "**Permission Markers**\n"
                 "🔓 Everyone\n"
-                "🛡️ Mod / Manage Channels\n"
-                "👑 Admin / Manage Server\n"
+                "🛡️ Mod\n"
+                "👑 Admin\n"
                 "🏠 Guild Owner\n"
                 "⚙️ Bot Owner\n"
                 "😀 Manage Emojis\n"
-                "🤖 Bot perms required"
+                "🤖 Bot permissions required"
             ),
             color=discord.Color.blurple(),
         )
 
-        embed.add_field(
-            name="EmojiSteal",
-            value=(
-                f"🔓 `{prefix}steal` / `{prefix}emojisteal` — Get emoji/sticker URLs from a replied message\n"
-                f"😀🤖 `{prefix}steal upload [names...]` — Upload replied emojis/stickers to this server\n"
-                f"🔓 `{prefix}getemoji <emoji|emoji_id>` — Get emoji image URL\n"
-                f"😀🤖 `{prefix}uploadsticker [name]` — Upload an attached sticker file\n"
-                "🔓 Context menus: `Steal Emotes`\n"
-                "😀🤖 Context menus: `Steal+Upload Emotes`"
-            ),
-            inline=False,
-        )
+        for cog_name in self.TARGET_COGS:
+            section = self._build_cog_section(prefix, cog_name)
+            embed.add_field(name=cog_name, value=section, inline=False)
 
-        embed.add_field(
-            name="Deepfry",
-            value=(
-                f"🤖 `{prefix}deepfry [member|image_url]` — Deepfry an image\n"
-                f"🤖 `{prefix}df [member|image_url]` — Alias for deepfry\n"
-                f"🤖 `{prefix}nuke [member|image_url]` — More destructive image effect\n"
-                f"🏠 `{prefix}deepfryset` — View deepfry config\n"
-                f"🏠 `{prefix}deepfryset frychance <value>` — Set auto-deepfry chance\n"
-                f"🏠 `{prefix}deepfryset nukechance <value>` — Set auto-nuke chance\n"
-                f"🏠 `{prefix}deepfryset allowalltypes <true|false>` — Allow unverified file types\n"
-                f"🏠 `{prefix}deepfryset replyonly <true|false>` — Require reply/direct input only\n"
-                f"🏠 `{prefix}deepfryset debug <true|false>` — Toggle debug mode"
-            ),
-            inline=False,
-        )
-
-        embed.add_field(
-            name="AddImage",
-            value=(
-                f"🛡️🤖 `{prefix}addimage add <name>` — Add a server image trigger\n"
-                f"🔓🤖 `{prefix}addimage list [guild|global]` — List saved image triggers\n"
-                f"🛡️ `{prefix}addimage ignoreglobal` — Toggle global image triggers in this server\n"
-                f"🛡️ `{prefix}addimage clear_images` — Remove all server image triggers\n"
-                f"🛡️ `{prefix}addimage clean_deleted_images` — Clean missing/deleted image files\n"
-                f"🛡️ `{prefix}addimage delete <name>` — Delete a server image trigger\n"
-                f"⚙️ `{prefix}addimage deleteglobal <name>` — Delete a global image trigger\n"
-                f"⚙️ `{prefix}addimage clear_global` — Clear all global image triggers\n"
-                f"⚙️ `{prefix}addimage deleteallbyuser <user_id>` — Delete all triggers by user ID\n"
-                f"Aliases for delete: `remove`, `rem`, `del`\n"
-                f"Aliases for deleteglobal: `dg`, `delglobal`"
-            ),
-            inline=False,
-        )
-
-        embed.add_field(
-            name="Birthday",
-            value=(
-                f"🔓 `{prefix}birthday set <date>` / `{prefix}bday set <date>` — Set your birthday\n"
-                f"🔓 `{prefix}birthday remove` — Remove your birthday\n"
-                f"🔓 `{prefix}birthday upcoming [days]` — Show upcoming birthdays\n"
-                f"👑 `{prefix}bdset` — Birthday admin settings\n"
-                f"👑🤖 `{prefix}bdset interactive` — Run setup flow\n"
-                f"👑 `{prefix}bdset settings` — View current birthday settings\n"
-                f"👑 `{prefix}bdset time <time>` — Set birthday announcement time\n"
-                f"👑 `{prefix}bdset msgwithoutyear <message>` — Set no-year birthday message\n"
-                f"👑 `{prefix}bdset msgwithyear <message>` — Set with-year birthday message\n"
-                f"👑 `{prefix}bdset forceset <user> <date>` — Force-set a user birthday\n"
-                f"👑 `{prefix}bdset forceremove <user>` — Force-remove a user birthday\n"
-                f"⚙️ `{prefix}birthdaydebug upcoming` — Hidden owner debug command"
-            ),
-            inline=False,
-        )
-
-        embed.set_footer(text="Custom command menu")
+        embed.set_footer(text="Auto-detected commands")
         return embed
 
-    @commands.command(name="commands", aliases=["cmds", "helpmenu", "clanhelp"])
+    @commands.command(name="commands", aliases=["cmds", "clanhelp", "helpmenu"])
     async def commands_menu(self, ctx: commands.Context):
-        """Show a custom embedded command list."""
+        """Show the embedded command list."""
         embed = self.build_embed(ctx.clean_prefix)
         await ctx.send(embed=embed)
 
 
 async def setup(bot):
-    await bot.add_cog(CustomCommandsHelp(bot))
+    await bot.add_cog(Commands(bot))
