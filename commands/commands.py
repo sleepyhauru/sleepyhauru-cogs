@@ -148,6 +148,29 @@ class Commands(commands.Cog):
 
         return lines
 
+    def build_home_embed(self, prefix: str) -> discord.Embed:
+        lines = []
+
+        for cog_name in self.TARGET_COGS:
+            command_count = len(self._build_cog_lines(prefix, cog_name))
+            if command_count == 0:
+                continue
+            lines.append(f"**{cog_name}** — {command_count} command{'s' if command_count != 1 else ''}")
+
+        description = (
+            f"Use `{prefix}help <command>` for detailed help.\n\n"
+            f"Select a category from the dropdown below.\n\n"
+            f"{chr(10).join(lines) if lines else 'No command categories available.'}"
+        )
+
+        embed = discord.Embed(
+            title="Bot Commands",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Choose a cog from the dropdown menu.")
+        return embed
+
     def build_cog_embed(self, prefix: str, cog_name: str) -> discord.Embed:
         lines = self._build_cog_lines(prefix, cog_name)
 
@@ -169,7 +192,7 @@ class Commands(commands.Cog):
             description = "\n".join(trimmed_lines)
 
         embed = discord.Embed(
-            title=f"{cog_name}",
+            title=cog_name,
             description=description,
             color=discord.Color.blurple(),
         )
@@ -179,8 +202,7 @@ class Commands(commands.Cog):
     @commands.command(name="commands", aliases=["cmds", "helpmenu", "clanhelp"])
     async def commands_menu(self, ctx: commands.Context):
         """Show the command list."""
-        first_cog = self.TARGET_COGS[0]
-        embed = self.build_cog_embed(ctx.clean_prefix, first_cog)
+        embed = self.build_home_embed(ctx.clean_prefix)
         view = CommandsMenuView(
             cog=self,
             author_id=ctx.author.id,
