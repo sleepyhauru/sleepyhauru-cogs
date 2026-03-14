@@ -102,7 +102,7 @@ class Commands(commands.Cog):
             description = "\n".join(trimmed_lines)
 
         embed = discord.Embed(
-            title=f"Bot Commands — {cog_name}",
+            title=f"{cog_name}",
             description=description,
             color=discord.Color.blurple(),
         )
