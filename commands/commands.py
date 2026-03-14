@@ -25,10 +25,14 @@ class Commands(commands.Cog):
         "deepfryset": "🏠",
         "deepfryset frychance": "🏠",
         "deepfryset nukechance": "🏠",
+        "deepfryset allowalltypes": "🏠",
+        "deepfryset replyonly": "🏠",
+        "deepfryset debug": "🏠",
 
         "addimage": "🛡️",
         "addimage add": "🛡️🤖",
         "addimage list": "🔓🤖",
+        "addimage ignoreglobal": "🛡️",
         "addimage delete": "🛡️",
         "addimage clear_images": "🛡️",
         "addimage clean_deleted_images": "🛡️",
@@ -46,6 +50,12 @@ class Commands(commands.Cog):
         "bdset interactive": "👑🤖",
         "bdset settings": "👑",
         "bdset time": "👑",
+        "bdset msgwithoutyear": "👑",
+        "bdset msgwithyear": "👑",
+        "bdset forceset": "👑",
+        "bdset forceremove": "👑",
+
+        "birthdaydebug": "⚙️",
     }
 
     def __init__(self, bot):
@@ -53,8 +63,8 @@ class Commands(commands.Cog):
 
     def _visible_root_commands_for_cog(self, cog_name: str) -> List[commands.Command]:
         cmds = []
-        for cmd in self.bot.commands.values():
-            if cmd.cog_name != cog_name:
+        for cmd in self.bot.commands:
+            if getattr(cmd, "cog_name", None) != cog_name:
                 continue
             if cmd.hidden:
                 continue
@@ -121,10 +131,13 @@ class Commands(commands.Cog):
 
         text = "\n".join(lines)
 
+        if not text:
+            return "No commands detected."
+
         if len(text) > 1024:
             text = text[:1000] + "\n..."
 
-        return text or "No commands detected."
+        return text
 
     def build_embed(self, prefix: str) -> discord.Embed:
         embed = discord.Embed(
