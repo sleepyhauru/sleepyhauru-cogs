@@ -26,7 +26,6 @@ class Commands(commands.Cog):
             if cmd.parent is not None:
                 continue
             cmds.append(cmd)
-
         return sorted(cmds, key=lambda c: c.name.lower())
 
     def _walk_visible_subcommands(self, command: commands.Command) -> List[commands.Command]:
@@ -36,39 +35,31 @@ class Commands(commands.Cog):
                 if sub.hidden:
                     continue
                 found.append(sub)
-
                 if isinstance(sub, commands.Group):
                     found.extend(self._walk_visible_subcommands(sub))
-
         return found
 
     def _command_usage(self, prefix: str, command: commands.Command) -> str:
         base = f"{prefix}{command.qualified_name}"
-
         if command.signature:
             return f"{base} {command.signature}"
-
         return base
 
     def _command_description(self, command: commands.Command) -> str:
         text = command.short_doc or command.help or ""
         text = " ".join(text.split())
-
         if len(text) > 90:
-            text = text[:87] + "..."
-
+            text = text[:87].rstrip() + "..."
         return text
 
     def _format_command_line(self, prefix: str, command: commands.Command) -> str:
         usage = self._command_usage(prefix, command)
         desc = self._command_description(command)
-
         if desc:
             return f"**`{usage}`** — {desc}"
-
         return f"**`{usage}`**"
 
-    def _build_cog_section(self, prefix: str, cog_name: str) -> str:
+    def _build_cog_lines(self, prefix: str, cog_name: str) -> List[str]:
         lines: List[str] = []
         seen: Set[str] = set()
 
@@ -84,44 +75,53 @@ class Commands(commands.Cog):
             for sub in self._walk_visible_subcommands(root):
                 if sub.qualified_name in seen:
                     continue
-
                 seen.add(sub.qualified_name)
                 lines.append(self._format_command_line(prefix, sub))
 
-        text = "\n".join(lines)
+        return lines
 
-        if not text:
-            return "No commands detected."
+    def _build_cog_embed(self, prefix: str, cog_name: str, index: int, total: int) -> discord.Embed:
+        lines = self._build_cog_lines(prefix, cog_name)
 
-        if len(text) > 1024:
-            text = text[:1000] + "\n..."
+        if not lines:
+            description = "No commands detected."
+        else:
+            description = "\n".join(lines)
 
-        return text
+        # Discord embed description limit is 4096
+        if len(description) > 4096:
+            trimmed_lines = []
+            total_len = 0
+            for line in lines:
+                add_len = len(line) + 1
+                if total_len + add_len > 4000:
+                    trimmed_lines.append("...")
+                    break
+                trimmed_lines.append(line)
+                total_len += add_len
+            description = "\n".join(trimmed_lines)
 
-    def build_embed(self, prefix: str) -> discord.Embed:
         embed = discord.Embed(
-            title="Bot Commands",
-            description=f"Use `{prefix}help <command>` for detailed help.",
+            title=f"Bot Commands — {cog_name}",
+            description=description,
             color=discord.Color.blurple(),
         )
-
-        for cog_name in self.TARGET_COGS:
-            section = self._build_cog_section(prefix, cog_name)
-            embed.add_field(
-                name=cog_name,
-                value=section,
-                inline=False,
-            )
-
-        embed.set_footer(text="Command list")
+        embed.set_footer(text=f"Use {prefix}help <command> for detailed help • Page {index}/{total}")
         return embed
+
+    def build_embeds(self, prefix: str) -> List[discord.Embed]:
+        embeds = []
+        total = len(self.TARGET_COGS)
+
+        for index, cog_name in enumerate(self.TARGET_COGS, start=1):
+            embeds.append(self._build_cog_embed(prefix, cog_name, index, total))
+
+        return embeds
 
     @commands.command(name="commands", aliases=["cmds", "helpmenu", "clanhelp"])
     async def commands_menu(self, ctx: commands.Context):
         """Show the command list."""
-        embed = self.build_embed(ctx.clean_prefix)
-        await ctx.send(embed=embed)
+        embeds = self.build_embeds(ctx.clean_prefix)
 
-
-async def setup(bot):
-    await bot.add_cog(Commands(bot))
+        for embed in embeds:
+            await ctx.send(embed=embed)
