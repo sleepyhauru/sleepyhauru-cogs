@@ -10,7 +10,7 @@ class LinkedIn(commands.Cog):
     """Translate text into Kagi LinkedIn Speak."""
 
     __author__ = "sleepyhauru"
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"
 
     API_URL = "https://translate.kagi.com/api/translate"
 
@@ -244,11 +244,4 @@ class LinkedIn(commands.Cog):
                 await ctx.send(f"Translation failed: {e}")
                 return
 
-        embed = discord.Embed(
-            title="LinkedIn Speak",
-            description=output[:4096],
-            color=await ctx.embed_color(),
-        )
-        embed.add_field(name="Input", value=target_text[:1024], inline=False)
-        embed.set_footer(text="Powered by Kagi Translate")
-        await ctx.send(embed=embed)
+        await ctx.send(output)
