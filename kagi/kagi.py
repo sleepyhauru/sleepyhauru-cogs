@@ -1,16 +1,17 @@
 import json
+import random
 from typing import Optional
 
 import aiohttp
 import discord
-from redbot.core import commands, Config
+from redbot.core import Config, commands
 
 
-class LinkedIn(commands.Cog):
-    """Translate text with Kagi styles."""
+class Kagi(commands.Cog):
+    """Kagi Translate integrations for LinkedIn and Gen Z styles."""
 
     __author__ = "sleepyhauru"
-    __version__ = "1.3.0"
+    __version__ = "2.1.0"
 
     API_URL = "https://translate.kagi.com/api/translate"
 
@@ -24,9 +25,11 @@ class LinkedIn(commands.Cog):
             model="standard",
         )
 
+        self.last_outputs = {}
+
     def format_help_for_context(self, ctx: commands.Context) -> str:
-        pre_processed = super().format_help_for_context(ctx)
-        return f"{pre_processed}\n\nVersion: {self.__version__}"
+        base = super().format_help_for_context(ctx)
+        return f"{base}\n\nVersion: {self.__version__}"
 
     async def red_delete_data_for_user(self, **kwargs):
         return
@@ -43,7 +46,29 @@ class LinkedIn(commands.Cog):
         except Exception:
             return text
 
-    async def _translate(self, text: str, from_lang: str = "en_us", to_lang: str = "linkedin") -> str:
+    def _apply_rng_style(self, text: str, mode: str) -> str:
+        linkedin_styles = [
+            "Rewrite this in corporate LinkedIn tone.",
+            "Make this extremely over-the-top LinkedIn influencer cringe.",
+            "Rewrite this as a humblebrag LinkedIn post.",
+            "Rewrite this like a startup founder giving motivational insight.",
+        ]
+
+        genz_styles = [
+            "Rewrite this in casual Gen Z style.",
+            "Rewrite this in exaggerated Gen Z slang.",
+            "Rewrite this like someone extremely online.",
+            "Rewrite this in dry, deadpan Gen Z humor.",
+        ]
+
+        if mode == "linkedin":
+            style = random.choice(linkedin_styles)
+        else:
+            style = random.choice(genz_styles)
+
+        return f"{text}\n\n{style}"
+
+    async def _translate(self, text: str, to_lang: str) -> str:
         kagi_session, translate_session = await self._get_auth()
         model = await self.config.model()
 
@@ -63,7 +88,7 @@ class LinkedIn(commands.Cog):
 
         payload = {
             "text": text,
-            "from": from_lang,
+            "from": "en_us",
             "to": to_lang,
             "stream": True,
             "formality": "default",
@@ -121,7 +146,7 @@ class LinkedIn(commands.Cog):
 
         return final_text
 
-    async def _get_target_text(self, ctx: commands.Context, text: Optional[str]) -> Optional[str]:
+    async def _get_text(self, ctx: commands.Context, text: Optional[str]) -> Optional[str]:
         if text and text.strip():
             return text.strip()
 
@@ -163,10 +188,58 @@ class LinkedIn(commands.Cog):
 
         return None
 
+    async def _run_style_command(
+        self,
+        ctx: commands.Context,
+        text: Optional[str],
+        mode_key: str,
+        target_lang: str,
+        missing_text_message: str,
+    ):
+        kagi_session, translate_session = await self._get_auth()
+
+        if not kagi_session or not translate_session:
+            await ctx.send(
+                "Kagi auth is not configured. Use the owner setup commands first:\n"
+                "`!linkedinset setkagi <value>`\n"
+                "`!linkedinset settranslate <value>`"
+            )
+            return
+
+        target = await self._get_text(ctx, text)
+        if not target:
+            await ctx.send(missing_text_message)
+            return
+
+        if len(target) > 4000:
+            await ctx.send("That message is too long to translate.")
+            return
+
+        styled_input = self._apply_rng_style(target, mode_key)
+
+        async with ctx.typing():
+            try:
+                output = await self._translate(styled_input, target_lang)
+
+                history_key = (ctx.author.id, mode_key)
+                last = self.last_outputs.get(history_key)
+
+                if last == output:
+                    styled_input = self._apply_rng_style(f"{target}\n\nMake this feel noticeably different.", mode_key)
+                    output = await self._translate(styled_input, target_lang)
+
+                self.last_outputs[history_key] = output
+
+            except Exception as e:
+                await ctx.send(f"Error: {e}")
+                return
+
+        await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
+
     @commands.group(name="linkedinset", invoke_without_command=True)
     @commands.is_owner()
     async def linkedinset(self, ctx: commands.Context):
-        """Configure the LinkedIn cog."""
+        """Configure the Kagi cog."""
         await ctx.send_help()
 
     @linkedinset.command(name="setkagi")
@@ -223,32 +296,13 @@ class LinkedIn(commands.Cog):
         - !linkedin some text here
         - reply to a message with !linkedin
         """
-        kagi_session, translate_session = await self._get_auth()
-        if not kagi_session or not translate_session:
-            await ctx.send(
-                "Kagi auth is not configured. Use the owner setup commands first:\n"
-                "`!linkedinset setkagi <value>`\n"
-                "`!linkedinset settranslate <value>`"
-            )
-            return
-
-        target_text = await self._get_target_text(ctx, text)
-        if not target_text:
-            await ctx.send("Provide text after `!linkedin` or reply to a message with `!linkedin`.")
-            return
-
-        if len(target_text) > 4000:
-            await ctx.send("That message is too long to translate.")
-            return
-
-        async with ctx.typing():
-            try:
-                output = await self._translate(target_text, from_lang="en_us", to_lang="linkedin")
-            except Exception as e:
-                await ctx.send(f"Translation failed: {e}")
-                return
-
-        await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
+        await self._run_style_command(
+            ctx=ctx,
+            text=text,
+            mode_key="linkedin",
+            target_lang="linkedin",
+            missing_text_message="Provide text after `!linkedin` or reply to a message with `!linkedin`.",
+        )
 
     @commands.command(name="genz")
     @commands.cooldown(2, 10, commands.BucketType.user)
@@ -260,29 +314,10 @@ class LinkedIn(commands.Cog):
         - !genz some text here
         - reply to a message with !genz
         """
-        kagi_session, translate_session = await self._get_auth()
-        if not kagi_session or not translate_session:
-            await ctx.send(
-                "Kagi auth is not configured. Use the owner setup commands first:\n"
-                "`!linkedinset setkagi <value>`\n"
-                "`!linkedinset settranslate <value>`"
-            )
-            return
-
-        target_text = await self._get_target_text(ctx, text)
-        if not target_text:
-            await ctx.send("Provide text after `!genz` or reply to a message with `!genz`.")
-            return
-
-        if len(target_text) > 4000:
-            await ctx.send("That message is too long to translate.")
-            return
-
-        async with ctx.typing():
-            try:
-                output = await self._translate(target_text, from_lang="en_us", to_lang="gen_z")
-            except Exception as e:
-                await ctx.send(f"Translation failed: {e}")
-                return
-
-        await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
+        await self._run_style_command(
+            ctx=ctx,
+            text=text,
+            mode_key="genz",
+            target_lang="gen_z",
+            missing_text_message="Provide text after `!genz` or reply to a message with `!genz`.",
+        )
