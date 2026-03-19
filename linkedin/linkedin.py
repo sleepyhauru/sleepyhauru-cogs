@@ -7,10 +7,10 @@ from redbot.core import commands, Config
 
 
 class LinkedIn(commands.Cog):
-    """Translate text into Kagi LinkedIn Speak."""
+    """Translate text with Kagi styles."""
 
     __author__ = "sleepyhauru"
-    __version__ = "1.2.0"
+    __version__ = "1.3.0"
 
     API_URL = "https://translate.kagi.com/api/translate"
 
@@ -237,6 +237,10 @@ class LinkedIn(commands.Cog):
             await ctx.send("Provide text after `!linkedin` or reply to a message with `!linkedin`.")
             return
 
+        if len(target_text) > 4000:
+            await ctx.send("That message is too long to translate.")
+            return
+
         async with ctx.typing():
             try:
                 output = await self._translate(target_text, from_lang="en_us", to_lang="linkedin")
@@ -244,4 +248,41 @@ class LinkedIn(commands.Cog):
                 await ctx.send(f"Translation failed: {e}")
                 return
 
-        await ctx.send(output)
+        await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
+
+    @commands.command(name="genz")
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def genz(self, ctx: commands.Context, *, text: Optional[str] = None):
+        """
+        Rewrite text into Gen Z style.
+
+        Usage:
+        - !genz some text here
+        - reply to a message with !genz
+        """
+        kagi_session, translate_session = await self._get_auth()
+        if not kagi_session or not translate_session:
+            await ctx.send(
+                "Kagi auth is not configured. Use the owner setup commands first:\n"
+                "`!linkedinset setkagi <value>`\n"
+                "`!linkedinset settranslate <value>`"
+            )
+            return
+
+        target_text = await self._get_target_text(ctx, text)
+        if not target_text:
+            await ctx.send("Provide text after `!genz` or reply to a message with `!genz`.")
+            return
+
+        if len(target_text) > 4000:
+            await ctx.send("That message is too long to translate.")
+            return
+
+        async with ctx.typing():
+            try:
+                output = await self._translate(target_text, from_lang="en_us", to_lang="gen_z")
+            except Exception as e:
+                await ctx.send(f"Translation failed: {e}")
+                return
+
+        await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
