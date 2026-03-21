@@ -87,6 +87,33 @@ class EmojiSteal(commands.Cog):
         current_emojis = len([em for em in guild.emojis if em.animated == animated])
         return guild.emoji_limit - current_emojis
 
+    async def _upload_stickers(
+        self,
+        guild: discord.Guild,
+        stickers: List[discord.StickerItem],
+    ) -> tuple[List[str], Optional[str]]:
+        uploaded = []
+
+        for sticker in stickers:
+            if len(guild.stickers) >= guild.sticker_limit:
+                return uploaded, STICKER_SLOTS
+
+            fp = io.BytesIO()
+            try:
+                await sticker.save(fp)
+                await guild.create_sticker(
+                    name=sticker.name,
+                    description=STICKER_DESC,
+                    emoji=STICKER_EMOJI,
+                    file=discord.File(fp),
+                )
+            except discord.DiscordException as error:
+                return uploaded, f"{STICKER_FAIL}, {type(error).__name__}: {error}"
+
+            uploaded.append(sticker.name)
+
+        return uploaded, None
+
     async def steal_ctx(self, ctx: commands.Context) -> Optional[Union[List[discord.PartialEmoji], List[discord.StickerItem]]]:
         reference = ctx.message.reference
         if not reference or not reference.message_id:
@@ -128,7 +155,7 @@ class EmojiSteal(commands.Cog):
     @steal_command.command(name="upload")
     @commands.guild_only()
     @commands.has_permissions(manage_emojis=True)
-    @commands.bot_has_permissions(manage_emojis=True, add_reactions=True)
+    @commands.bot_has_permissions(manage_emojis=True)
     async def steal_upload_command(self, ctx: commands.Context, *names: str):
         """Steals emojis and stickers you reply to and uploads them to this server."""
         assert ctx.guild
@@ -136,21 +163,16 @@ class EmojiSteal(commands.Cog):
             return
         
         if isinstance(emojis_or_stickers[0], discord.StickerItem):
-            if len(ctx.guild.stickers) >= ctx.guild.sticker_limit:
-                return await ctx.send(STICKER_SLOTS)
+            uploaded, error = await self._upload_stickers(ctx.guild, emojis_or_stickers)
+            if error and not uploaded:
+                return await ctx.send(error)
 
-            sticker = emojis_or_stickers[0]
-            fp = io.BytesIO()
-
-            try:
-                await sticker.save(fp)
-                await ctx.guild.create_sticker(
-                    name=sticker.name, description=STICKER_DESC, emoji=STICKER_EMOJI, file=discord.File(fp))
-
-            except discord.DiscordException as error:
-                return await ctx.send(f"{STICKER_FAIL}, {type(error).__name__}: {error}")
-
-            return await ctx.send(f"{STICKER_SUCCESS}: {sticker.name}")
+            response = []
+            if uploaded:
+                response.append(f"{STICKER_SUCCESS}: {', '.join(uploaded)}")
+            if error:
+                response.append(error)
+            return await ctx.send("\n".join(response))
         
         final_names = [''.join(re.findall(r"\w+", name)) for name in names]
         final_names = [name if len(name) >= 2 else None for name in final_names]
@@ -193,20 +215,16 @@ class EmojiSteal(commands.Cog):
         await ctx.response.defer(thinking=True)
         
         if isinstance(emojis_or_stickers[0], discord.StickerItem):
-            if len(ctx.guild.stickers) >= ctx.guild.sticker_limit:
-                return await ctx.edit_original_response(content=STICKER_SLOTS)
+            uploaded, error = await self._upload_stickers(ctx.guild, emojis_or_stickers)
+            if error and not uploaded:
+                return await ctx.edit_original_response(content=error)
 
-            sticker = emojis_or_stickers[0]
-            fp = io.BytesIO()
-            try:
-                await sticker.save(fp)
-                await ctx.guild.create_sticker(
-                    name=sticker.name, description=STICKER_DESC, emoji=STICKER_EMOJI, file=discord.File(fp))
-
-            except discord.DiscordException as error:
-                return await ctx.edit_original_response(content=f"{STICKER_FAIL}, {type(error).__name__}: {error}")
-
-            return await ctx.edit_original_response(content=f"{STICKER_SUCCESS}: {sticker.name}")
+            response = []
+            if uploaded:
+                response.append(f"{STICKER_SUCCESS}: {', '.join(uploaded)}")
+            if error:
+                response.append(error)
+            return await ctx.edit_original_response(content="\n".join(response))
 
         added_emojis = []
         emojis: List[discord.PartialEmoji] = list(dict.fromkeys(emojis_or_stickers))  # type: ignore

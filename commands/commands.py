@@ -1,7 +1,7 @@
 import discord
 from discord.ui import Select, View
 from redbot.core import commands
-from typing import List, Set
+from typing import List, Optional, Set
 
 
 class CommandsMenuSelect(Select):
@@ -40,11 +40,17 @@ class CommandsMenuView(View):
         self.cog = cog
         self.author_id = author_id
         self.prefix = prefix
+        self.message: Optional[discord.Message] = None
         self.add_item(CommandsMenuSelect(cog_names))
 
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 class Commands(commands.Cog):
@@ -148,13 +154,17 @@ class Commands(commands.Cog):
 
         return lines
 
+    def _available_cogs(self, prefix: str) -> List[str]:
+        return [
+            cog_name for cog_name in self.TARGET_COGS
+            if self._build_cog_lines(prefix, cog_name)
+        ]
+
     def build_home_embed(self, prefix: str) -> discord.Embed:
         lines = []
 
-        for cog_name in self.TARGET_COGS:
+        for cog_name in self._available_cogs(prefix):
             command_count = len(self._build_cog_lines(prefix, cog_name))
-            if command_count == 0:
-                continue
             lines.append(f"**{cog_name}** — {command_count} command{'s' if command_count != 1 else ''}")
 
         description = (
@@ -202,11 +212,18 @@ class Commands(commands.Cog):
     @commands.command(name="commands", aliases=["cmds", "helpmenu", "clanhelp"])
     async def commands_menu(self, ctx: commands.Context):
         """Show the command list."""
-        embed = self.build_home_embed(ctx.clean_prefix)
+        prefix = ctx.clean_prefix
+        available_cogs = self._available_cogs(prefix)
+        embed = self.build_home_embed(prefix)
+
+        if not available_cogs:
+            await ctx.send(embed=embed)
+            return
+
         view = CommandsMenuView(
             cog=self,
             author_id=ctx.author.id,
-            prefix=ctx.clean_prefix,
-            cog_names=self.TARGET_COGS,
+            prefix=prefix,
+            cog_names=available_cogs,
         )
-        await ctx.send(embed=embed, view=view)
+        view.message = await ctx.send(embed=embed, view=view)

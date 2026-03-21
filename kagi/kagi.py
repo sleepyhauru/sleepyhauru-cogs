@@ -39,11 +39,26 @@ class Kagi(commands.Cog):
         translate_session = await self.config.translate_session()
         return kagi_session.strip(), translate_session.strip()
 
-    async def _delete_invoking_message(self, ctx: commands.Context) -> None:
+    async def _delete_invoking_message(self, ctx: commands.Context) -> bool:
         try:
             await ctx.message.delete()
+            return True
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-            pass
+            return False
+
+    async def _ensure_secure_config_context(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            return True
+
+        perms = ctx.channel.permissions_for(ctx.guild.me)
+        if perms.manage_messages:
+            return True
+
+        await ctx.send(
+            "I need `Manage Messages` in this channel before I can accept tokens here. "
+            "Either grant that permission or run this command in DMs."
+        )
+        return False
 
     @staticmethod
     def _fix_mojibake(text: str) -> str:
@@ -252,10 +267,20 @@ class Kagi(commands.Cog):
     @commands.is_owner()
     async def set_kagi_session(self, ctx: commands.Context, *, value: str):
         """Set the kagi_session cookie value."""
+        if not await self._ensure_secure_config_context(ctx):
+            return
         await self.config.kagi_session.set(value.strip())
-        await self._delete_invoking_message(ctx)
+        deleted = True
+        if ctx.guild is not None:
+            deleted = await self._delete_invoking_message(ctx)
         try:
-            await ctx.author.send("Saved `kagi_session`.")
+            if deleted:
+                await ctx.author.send("Saved `kagi_session`.")
+            else:
+                await ctx.author.send(
+                    "Saved `kagi_session`, but I could not delete your original message. "
+                    "Please remove it manually."
+                )
         except discord.Forbidden:
             pass
 
@@ -263,10 +288,20 @@ class Kagi(commands.Cog):
     @commands.is_owner()
     async def set_translate_session(self, ctx: commands.Context, *, value: str):
         """Set the translate_session value."""
+        if not await self._ensure_secure_config_context(ctx):
+            return
         await self.config.translate_session.set(value.strip())
-        await self._delete_invoking_message(ctx)
+        deleted = True
+        if ctx.guild is not None:
+            deleted = await self._delete_invoking_message(ctx)
         try:
-            await ctx.author.send("Saved `translate_session`.")
+            if deleted:
+                await ctx.author.send("Saved `translate_session`.")
+            else:
+                await ctx.author.send(
+                    "Saved `translate_session`, but I could not delete your original message. "
+                    "Please remove it manually."
+                )
         except discord.Forbidden:
             pass
 
