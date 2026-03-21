@@ -14,8 +14,9 @@ FETCH_FAIL = "Couldn't fetch the 7TV emote asset."
 
 
 ID_PATTERNS = (
-    re.compile(r"https?://(?:www\.)?7tv\.app/(?:emote|emotes)/([A-Za-z0-9]{24})", re.IGNORECASE),
-    re.compile(r"https?://cdn\.7tv\.app/emote/([A-Za-z0-9]{24})/", re.IGNORECASE),
+    # 7TV v3 emote IDs can be 26+ chars; allow a generous range
+    re.compile(r"https?://(?:www\.)?7tv\.app/(?:emote|emotes)/([A-Za-z0-9]{24,36})", re.IGNORECASE),
+    re.compile(r"https?://cdn\.7tv\.app/emote/([A-Za-z0-9]{24,36})/", re.IGNORECASE),
 )
 
 
