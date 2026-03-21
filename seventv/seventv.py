@@ -2,7 +2,7 @@ import aiohttp
 import discord
 import io
 import re
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 
 from redbot.core import commands
 
@@ -33,6 +33,9 @@ def _available_emoji_slots(guild: discord.Guild, animated: bool) -> int:
     return guild.emoji_limit - current
 
 
+HEADERS = {"User-Agent": "Mozilla/5.0 Red-DiscordBot-SevenTV/1.0"}
+
+
 async def _fetch_7tv_meta(session: aiohttp.ClientSession, emote_id: str) -> Tuple[Optional[str], Optional[bool]]:
     """Return (name, animated) if available via 7TV API; tolerate failures.
 
@@ -40,7 +43,7 @@ async def _fetch_7tv_meta(session: aiohttp.ClientSession, emote_id: str) -> Tupl
     """
     # v3
     try:
-        async with session.get(f"https://7tv.io/v3/emotes/{emote_id}") as resp:
+        async with session.get(f"https://7tv.io/v3/emotes/{emote_id}", headers=HEADERS) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 name = data.get("name")
@@ -51,7 +54,7 @@ async def _fetch_7tv_meta(session: aiohttp.ClientSession, emote_id: str) -> Tupl
 
     # v2 fallback
     try:
-        async with session.get(f"https://api.7tv.app/v2/emotes/{emote_id}") as resp:
+        async with session.get(f"https://api.7tv.app/v2/emotes/{emote_id}", headers=HEADERS) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 name = data.get("name")
@@ -63,19 +66,94 @@ async def _fetch_7tv_meta(session: aiohttp.ClientSession, emote_id: str) -> Tupl
     return None, None
 
 
+async def _fetch_7tv_asset_via_meta(session: aiohttp.ClientSession, emote_id: str) -> Tuple[Optional[bytes], Optional[bool], Optional[str]]:
+    """Use 7TV v3 metadata to choose a concrete asset URL and download it.
+
+    Returns (bytes, is_animated, ext) or (None, None, None) if unavailable.
+    """
+    try:
+        async with session.get(f"https://7tv.io/v3/emotes/{emote_id}", headers=HEADERS) as resp:
+            if resp.status != 200:
+                return None, None, None
+            data: Dict[str, Any] = await resp.json()
+    except aiohttp.ClientError:
+        return None, None, None
+
+    host = data.get("host") or {}
+    base_url = host.get("url") or ""
+    files = host.get("files") or []
+    if not isinstance(files, list) or not base_url:
+        return None, None, None
+
+    # Ensure absolute URL
+    if base_url.startswith("//"):
+        base_url = "https:" + base_url
+
+    # Preference order by format and size name suffix
+    def size_rank(name: str) -> int:
+        if name.startswith("4x"):
+            return 0
+        if name.startswith("3x"):
+            return 1
+        if name.startswith("2x"):
+            return 2
+        return 3
+
+    def file_key(f: Dict[str, Any]) -> tuple:
+        fmt = str(f.get("format", "")).upper()
+        name = str(f.get("name", ""))
+        # format priority: GIF, PNG, WEBP
+        fmt_rank = {"GIF": 0, "PNG": 1, "WEBP": 2}.get(fmt, 99)
+        return (fmt_rank, size_rank(name))
+
+    # Sort by preferred format and larger size first
+    candidates = sorted(
+        [f for f in files if isinstance(f, dict) and f.get("name")],
+        key=file_key,
+    )
+
+    for f in candidates:
+        fmt = str(f.get("format", "")).upper()
+        name = str(f.get("name", ""))
+        size = int(f.get("size", 0))
+        if fmt not in ("GIF", "PNG", "WEBP"):
+            continue
+        if size <= 0 or size > 256 * 1024:
+            continue
+        url = f"{base_url}/{name}"
+        try:
+            async with session.get(url, headers=HEADERS) as resp:
+                if resp.status != 200:
+                    continue
+                data_bytes = await resp.read()
+        except aiohttp.ClientError:
+            continue
+        if len(data_bytes) > 256 * 1024:
+            continue
+        return data_bytes, (fmt == "GIF"), fmt.lower()
+
+    return None, None, None
+
+
 async def _fetch_7tv_bytes(session: aiohttp.ClientSession, emote_id: str) -> Tuple[Optional[bytes], Optional[bool], Optional[str]]:
     """Try to download a suitable emote asset from the 7TV CDN within Discord's limits.
 
     Returns (bytes, is_animated, ext) on success; otherwise (None, None, None).
+    Tries meta-informed URLs first, then generic path fallback.
     Preference order: GIF 4x->1x, then PNG 4x->1x, then WEBP 4x->1x (as last resort).
     """
+    # Use meta-informed selection first
+    data, is_anim, ext = await _fetch_7tv_asset_via_meta(session, emote_id)
+    if data:
+        return data, is_anim, ext
+
     exts = ["gif", "png", "webp"]
     sizes = ["4x", "3x", "2x", "1x"]
     for ext in exts:
         for size in sizes:
             url = f"https://cdn.7tv.app/emote/{emote_id}/{size}.{ext}"
             try:
-                async with session.get(url) as resp:
+                async with session.get(url, headers=HEADERS) as resp:
                     if resp.status != 200:
                         continue
                     data = await resp.read()
