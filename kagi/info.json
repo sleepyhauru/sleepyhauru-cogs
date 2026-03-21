@@ -2,7 +2,7 @@
     "name": "kagi",
     "author": ["sleepyhauru"],
     "description": "Kagi Translate integration (LinkedIn + Gen Z styles with RNG personality modes).",
-    "install_msg": "Use !linkedinset to configure your Kagi session tokens.",
+    "install_msg": "Use !kagi to configure your Kagi session tokens.",
     "short": "Kagi translate tools",
     "tags": ["kagi", "translate", "linkedin", "fun"],
     "requirements": [],

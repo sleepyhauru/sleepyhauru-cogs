@@ -39,6 +39,12 @@ class Kagi(commands.Cog):
         translate_session = await self.config.translate_session()
         return kagi_session.strip(), translate_session.strip()
 
+    async def _delete_invoking_message(self, ctx: commands.Context) -> None:
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            pass
+
     @staticmethod
     def _fix_mojibake(text: str) -> str:
         try:
@@ -201,8 +207,8 @@ class Kagi(commands.Cog):
         if not kagi_session or not translate_session:
             await ctx.send(
                 "Kagi auth is not configured. Use the owner setup commands first:\n"
-                "`!linkedinset setkagi <value>`\n"
-                "`!linkedinset settranslate <value>`"
+                "`!kagi setkagi <value>`\n"
+                "`!kagi settranslate <value>`"
             )
             return
 
@@ -236,34 +242,42 @@ class Kagi(commands.Cog):
 
         await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
 
-    @commands.group(name="linkedinset", invoke_without_command=True)
+    @commands.group(name="kagi", invoke_without_command=True)
     @commands.is_owner()
-    async def linkedinset(self, ctx: commands.Context):
+    async def kagi(self, ctx: commands.Context):
         """Configure the Kagi cog."""
         await ctx.send_help()
 
-    @linkedinset.command(name="setkagi")
+    @kagi.command(name="setkagi")
     @commands.is_owner()
     async def set_kagi_session(self, ctx: commands.Context, *, value: str):
         """Set the kagi_session cookie value."""
         await self.config.kagi_session.set(value.strip())
-        await ctx.send("Saved `kagi_session`.")
+        await self._delete_invoking_message(ctx)
+        try:
+            await ctx.author.send("Saved `kagi_session`.")
+        except discord.Forbidden:
+            pass
 
-    @linkedinset.command(name="settranslate")
+    @kagi.command(name="settranslate")
     @commands.is_owner()
     async def set_translate_session(self, ctx: commands.Context, *, value: str):
         """Set the translate_session value."""
         await self.config.translate_session.set(value.strip())
-        await ctx.send("Saved `translate_session`.")
+        await self._delete_invoking_message(ctx)
+        try:
+            await ctx.author.send("Saved `translate_session`.")
+        except discord.Forbidden:
+            pass
 
-    @linkedinset.command(name="setmodel")
+    @kagi.command(name="setmodel")
     @commands.is_owner()
     async def set_model(self, ctx: commands.Context, *, model: str):
         """Set the Kagi model value, usually 'standard'."""
         await self.config.model.set(model.strip())
         await ctx.send(f"Saved model: `{model.strip()}`")
 
-    @linkedinset.command(name="show")
+    @kagi.command(name="show")
     @commands.is_owner()
     async def show_config(self, ctx: commands.Context):
         """Show whether the required auth values are configured."""
@@ -276,9 +290,12 @@ class Kagi(commands.Cog):
             f"- `translate_session`: {'set' if translate_session else 'missing'}\n"
             f"- `model`: `{model}`"
         )
-        await ctx.send(msg)
+        try:
+            await ctx.author.send(msg)
+        except discord.Forbidden:
+            await ctx.send("I couldn't DM you. Please enable DMs and try again.")
 
-    @linkedinset.command(name="clear")
+    @kagi.command(name="clear")
     @commands.is_owner()
     async def clear_config(self, ctx: commands.Context):
         """Clear stored auth values."""
