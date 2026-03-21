@@ -1,0 +1,12 @@
+{
+    "author": ["sleepyhauru"],
+    "min_bot_version": "3.5.0",
+    "description": "Upload a Discord emoji from a 7TV link via [p]7tv <link> [name]. Converts WEBP to GIF/PNG when needed.",
+    "hidden": false,
+    "install_msg": "7TV cog installed. Usage: [p]7tv <link> [name] (requires Manage Emojis).",
+    "required_cogs": {},
+    "requirements": ["pillow"],
+    "short": "Upload emoji from 7TV links.",
+    "end_user_data_statement": "This cog does not store any user data.",
+    "tags": ["7tv", "emoji", "upload"]
+}
