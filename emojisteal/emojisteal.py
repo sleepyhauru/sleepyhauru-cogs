@@ -3,7 +3,7 @@ import re
 import zipfile
 import aiohttp
 import discord
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Sequence
 from itertools import zip_longest
 from redbot.core import commands, app_commands
 
@@ -87,14 +87,53 @@ class EmojiSteal(commands.Cog):
         current_emojis = len([em for em in guild.emojis if em.animated == animated])
         return guild.emoji_limit - current_emojis
 
+    @staticmethod
+    def _sanitize_names(names: Sequence[str]) -> List[Optional[str]]:
+        cleaned = [''.join(re.findall(r"\w+", name)) for name in names]
+        return [name if len(name) >= 2 else None for name in cleaned]
+
+    @staticmethod
+    def _join_names(names: Sequence[str]) -> str:
+        return ", ".join(names)
+
+    async def _upload_emojis(
+        self,
+        guild: discord.Guild,
+        emojis: List[discord.PartialEmoji],
+        custom_names: Optional[Sequence[Optional[str]]] = None,
+    ) -> tuple[List[discord.Emoji], Optional[str]]:
+        added_emojis = []
+        custom_names = list(custom_names or [])
+
+        async with aiohttp.ClientSession() as session:
+            for emoji, name in zip_longest(emojis, custom_names):
+                if not emoji:
+                    break
+                if not self.available_emoji_slots(guild, emoji.animated):
+                    return added_emojis, EMOJI_SLOTS
+
+                try:
+                    image = await fetch_emoji_image(session, emoji)
+                    added = await guild.create_custom_emoji(name=name or emoji.name, image=image)
+                except (aiohttp.ClientError, discord.DiscordException) as error:
+                    return added_emojis, f"{EMOJI_FAIL} {emoji.name}, {type(error).__name__}: {error}"
+
+                added_emojis.append(added)
+
+        return added_emojis, None
+
     async def _upload_stickers(
         self,
         guild: discord.Guild,
         stickers: List[discord.StickerItem],
+        custom_names: Optional[Sequence[Optional[str]]] = None,
     ) -> tuple[List[str], Optional[str]]:
         uploaded = []
+        custom_names = list(custom_names or [])
 
-        for sticker in stickers:
+        for sticker, custom_name in zip_longest(stickers, custom_names):
+            if not sticker:
+                break
             if len(guild.stickers) >= guild.sticker_limit:
                 return uploaded, STICKER_SLOTS
 
@@ -102,7 +141,7 @@ class EmojiSteal(commands.Cog):
             try:
                 await sticker.save(fp)
                 await guild.create_sticker(
-                    name=sticker.name,
+                    name=custom_name or sticker.name,
                     description=STICKER_DESC,
                     emoji=STICKER_EMOJI,
                     file=discord.File(fp),
@@ -110,7 +149,7 @@ class EmojiSteal(commands.Cog):
             except discord.DiscordException as error:
                 return uploaded, f"{STICKER_FAIL}, {type(error).__name__}: {error}"
 
-            uploaded.append(sticker.name)
+            uploaded.append(custom_name or sticker.name)
 
         return uploaded, None
 
@@ -131,6 +170,33 @@ class EmojiSteal(commands.Cog):
             return None
         return emojis
 
+    async def _send_steal_info(
+        self,
+        destination,
+        guild: Optional[discord.Guild],
+        items: Union[List[discord.PartialEmoji], List[discord.StickerItem]],
+    ):
+        if items and isinstance(items[0], discord.StickerItem):
+            stickers = items
+            lines = [f"Found {len(stickers)} sticker{'s' if len(stickers) != 1 else ''}."]
+            lines.extend(f"- `{sticker.name}`" for sticker in stickers)
+            if guild is not None:
+                remaining = guild.sticker_limit - len(guild.stickers)
+                lines.append(f"Sticker slots remaining: {remaining}")
+            await destination.send("\n".join(lines))
+            return
+
+        emojis = list(dict.fromkeys(items))  # type: ignore[arg-type]
+        static_count = sum(1 for emoji in emojis if not emoji.animated)
+        animated_count = sum(1 for emoji in emojis if emoji.animated)
+        lines = [f"Found {len(emojis)} custom emoji{'s' if len(emojis) != 1 else ''}."]
+        lines.append(f"- Static: {static_count}")
+        lines.append(f"- Animated: {animated_count}")
+        if guild is not None:
+            lines.append(f"- Static slots remaining: {self.available_emoji_slots(guild, False)}")
+            lines.append(f"- Animated slots remaining: {self.available_emoji_slots(guild, True)}")
+        await destination.send("\n".join(lines))
+
 
     @commands.group(name="steal", aliases=["emojisteal"], invoke_without_command=True)
     async def steal_command(self, ctx: commands.Context):
@@ -139,6 +205,13 @@ class EmojiSteal(commands.Cog):
             return
         response = '\n'.join([emoji.url for emoji in emojis])
         await ctx.send(response)
+
+    @steal_command.command(name="info")
+    async def steal_info_command(self, ctx: commands.Context):
+        """Show what would be stolen and current slot availability."""
+        if not (emojis_or_stickers := await self.steal_ctx(ctx)):
+            return
+        await self._send_steal_info(ctx, ctx.guild, emojis_or_stickers)
 
 
     # context menu added in __init__
@@ -161,41 +234,39 @@ class EmojiSteal(commands.Cog):
         assert ctx.guild
         if not (emojis_or_stickers := await self.steal_ctx(ctx)):
             return
+        final_names = self._sanitize_names(names)
         
         if isinstance(emojis_or_stickers[0], discord.StickerItem):
-            uploaded, error = await self._upload_stickers(ctx.guild, emojis_or_stickers)
+            uploaded, error = await self._upload_stickers(ctx.guild, emojis_or_stickers, final_names)
             if error and not uploaded:
                 return await ctx.send(error)
 
             response = []
             if uploaded:
-                response.append(f"{STICKER_SUCCESS}: {', '.join(uploaded)}")
+                response.append(f"{STICKER_SUCCESS}: {self._join_names(uploaded)}")
+                response.append(f"Uploaded {len(uploaded)}/{len(emojis_or_stickers)} stickers.")
             if error:
                 response.append(error)
             return await ctx.send("\n".join(response))
         
-        final_names = [''.join(re.findall(r"\w+", name)) for name in names]
-        final_names = [name if len(name) >= 2 else None for name in final_names]
         emojis: List[discord.PartialEmoji] = list(dict.fromkeys(emojis_or_stickers))  # type: ignore
+        added_emojis, error = await self._upload_emojis(ctx.guild, emojis, final_names)
+        if error and not added_emojis:
+            return await ctx.send(error)
 
-        async with aiohttp.ClientSession() as session:
-            for emoji, name in zip_longest(emojis, final_names):
-                if not emoji:
-                    break
-                if not self.available_emoji_slots(ctx.guild, emoji.animated):
-                    return await ctx.send(EMOJI_SLOTS)
+        for added in added_emojis:
+            try:
+                await ctx.message.add_reaction(added)
+            except discord.DiscordException:
+                pass
 
-                try:
-                    image = await fetch_emoji_image(session, emoji)
-                    added = await ctx.guild.create_custom_emoji(name=name or emoji.name, image=image)
-
-                except (aiohttp.ClientError, discord.DiscordException) as error:
-                    return await ctx.send(f"{EMOJI_FAIL} {emoji.name}, {type(error).__name__}: {error}")
-
-                try:
-                    await ctx.message.add_reaction(added)
-                except discord.DiscordException:
-                    pass  # fail silently to not interrupt the loop, ideally there'd be a summary at the end
+        response = []
+        if added_emojis:
+            response.append(' '.join(str(e) for e in added_emojis))
+            response.append(f"Uploaded {len(added_emojis)}/{len(emojis)} emojis.")
+        if error:
+            response.append(error)
+        await ctx.send("\n".join(response))
 
 
     # context menu added in __init__
@@ -221,35 +292,21 @@ class EmojiSteal(commands.Cog):
 
             response = []
             if uploaded:
-                response.append(f"{STICKER_SUCCESS}: {', '.join(uploaded)}")
+                response.append(f"{STICKER_SUCCESS}: {self._join_names(uploaded)}")
+                response.append(f"Uploaded {len(uploaded)}/{len(emojis_or_stickers)} stickers.")
             if error:
                 response.append(error)
             return await ctx.edit_original_response(content="\n".join(response))
 
-        added_emojis = []
         emojis: List[discord.PartialEmoji] = list(dict.fromkeys(emojis_or_stickers))  # type: ignore
-        async with aiohttp.ClientSession() as session:
-            for emoji in emojis:
-                if not self.available_emoji_slots(ctx.guild, emoji.animated):
-                    response = EMOJI_SLOTS
-                    if added_emojis:
-                        response = ' '.join([str(e) for e in added_emojis]) + '\n' + response
-                    return await ctx.edit_original_response(content=response)
-
-                try:
-                    image = await fetch_emoji_image(session, emoji)
-                    added = await ctx.guild.create_custom_emoji(name=emoji.name, image=image)
-
-                except (aiohttp.ClientError, discord.DiscordException) as error:
-                    response = f"{EMOJI_FAIL} {emoji.name}, {type(error).__name__}: {error}"
-                    if added_emojis:
-                        response = ' '.join([str(e) for e in added_emojis]) + '\n' + response
-                    return await ctx.edit_original_response(content=response)
-
-                added_emojis.append(added)
-        
-        response = ' '.join([str(e) for e in added_emojis])
-        await ctx.edit_original_response(content=response)
+        added_emojis, error = await self._upload_emojis(ctx.guild, emojis)
+        response = []
+        if added_emojis:
+            response.append(' '.join(str(e) for e in added_emojis))
+            response.append(f"Uploaded {len(added_emojis)}/{len(emojis)} emojis.")
+        if error:
+            response.append(error)
+        await ctx.edit_original_response(content="\n".join(response))
 
 
     @commands.command()

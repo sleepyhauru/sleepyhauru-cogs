@@ -26,6 +26,9 @@ class Kagi(commands.Cog):
         )
 
         self.last_outputs = {}
+        self.config_dm_notice = (
+            "For safety, send this command to me in DMs instead of a server channel."
+        )
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         base = super().format_help_for_context(ctx)
@@ -39,25 +42,10 @@ class Kagi(commands.Cog):
         translate_session = await self.config.translate_session()
         return kagi_session.strip(), translate_session.strip()
 
-    async def _delete_invoking_message(self, ctx: commands.Context) -> bool:
-        try:
-            await ctx.message.delete()
-            return True
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-            return False
-
-    async def _ensure_secure_config_context(self, ctx: commands.Context) -> bool:
+    async def _require_dm_config(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
             return True
-
-        perms = ctx.channel.permissions_for(ctx.guild.me)
-        if perms.manage_messages:
-            return True
-
-        await ctx.send(
-            "I need `Manage Messages` in this channel before I can accept tokens here. "
-            "Either grant that permission or run this command in DMs."
-        )
+        await ctx.send(self.config_dm_notice)
         return False
 
     @staticmethod
@@ -257,6 +245,17 @@ class Kagi(commands.Cog):
 
         await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _send_owner_dm(self, ctx: commands.Context, message: str):
+        try:
+            await ctx.author.send(message)
+        except discord.Forbidden:
+            await ctx.send("I couldn't DM you. Please enable DMs and try again.")
+
+    async def _run_config_test(self) -> str:
+        output = await self._translate("Test message.", "linkedin")
+        preview = output.replace("\n", " ")[:120]
+        return f"Auth check passed.\nModel: `{await self.config.model()}`\nPreview: {preview}"
+
     @commands.group(name="kagi", invoke_without_command=True)
     @commands.is_owner()
     async def kagi(self, ctx: commands.Context):
@@ -267,43 +266,19 @@ class Kagi(commands.Cog):
     @commands.is_owner()
     async def set_kagi_session(self, ctx: commands.Context, *, value: str):
         """Set the kagi_session cookie value."""
-        if not await self._ensure_secure_config_context(ctx):
+        if not await self._require_dm_config(ctx):
             return
         await self.config.kagi_session.set(value.strip())
-        deleted = True
-        if ctx.guild is not None:
-            deleted = await self._delete_invoking_message(ctx)
-        try:
-            if deleted:
-                await ctx.author.send("Saved `kagi_session`.")
-            else:
-                await ctx.author.send(
-                    "Saved `kagi_session`, but I could not delete your original message. "
-                    "Please remove it manually."
-                )
-        except discord.Forbidden:
-            pass
+        await self._send_owner_dm(ctx, "Saved `kagi_session`.")
 
     @kagi.command(name="settranslate")
     @commands.is_owner()
     async def set_translate_session(self, ctx: commands.Context, *, value: str):
         """Set the translate_session value."""
-        if not await self._ensure_secure_config_context(ctx):
+        if not await self._require_dm_config(ctx):
             return
         await self.config.translate_session.set(value.strip())
-        deleted = True
-        if ctx.guild is not None:
-            deleted = await self._delete_invoking_message(ctx)
-        try:
-            if deleted:
-                await ctx.author.send("Saved `translate_session`.")
-            else:
-                await ctx.author.send(
-                    "Saved `translate_session`, but I could not delete your original message. "
-                    "Please remove it manually."
-                )
-        except discord.Forbidden:
-            pass
+        await self._send_owner_dm(ctx, "Saved `translate_session`.")
 
     @kagi.command(name="setmodel")
     @commands.is_owner()
@@ -325,18 +300,49 @@ class Kagi(commands.Cog):
             f"- `translate_session`: {'set' if translate_session else 'missing'}\n"
             f"- `model`: `{model}`"
         )
-        try:
-            await ctx.author.send(msg)
-        except discord.Forbidden:
-            await ctx.send("I couldn't DM you. Please enable DMs and try again.")
+        await self._send_owner_dm(ctx, msg)
 
     @kagi.command(name="clear")
     @commands.is_owner()
-    async def clear_config(self, ctx: commands.Context):
-        """Clear stored auth values."""
-        await self.config.kagi_session.set("")
-        await self.config.translate_session.set("")
-        await ctx.send("Cleared stored Kagi auth values.")
+    async def clear_config(self, ctx: commands.Context, target: str = "all"):
+        """Clear stored auth values for one token or all tokens."""
+        target = target.lower().strip()
+
+        if target in {"all", "both"}:
+            await self.config.kagi_session.set("")
+            await self.config.translate_session.set("")
+            await ctx.send("Cleared stored Kagi auth values.")
+            return
+
+        if target in {"kagi", "kagi_session"}:
+            await self.config.kagi_session.set("")
+            await ctx.send("Cleared `kagi_session`.")
+            return
+
+        if target in {"translate", "translate_session"}:
+            await self.config.translate_session.set("")
+            await ctx.send("Cleared `translate_session`.")
+            return
+
+        await ctx.send("Use `all`, `kagi`, or `translate`.")
+
+    @kagi.command(name="test")
+    @commands.is_owner()
+    async def test_config(self, ctx: commands.Context):
+        """Validate the stored Kagi auth values."""
+        kagi_session, translate_session = await self._get_auth()
+        if not kagi_session or not translate_session:
+            await ctx.send("Kagi auth is incomplete. Use `kagi show` to inspect current config state.")
+            return
+
+        async with ctx.typing():
+            try:
+                result = await self._run_config_test()
+            except Exception as error:
+                await ctx.send(f"Auth check failed: {error}")
+                return
+
+        await self._send_owner_dm(ctx, result)
 
     @commands.command(name="linkedin")
     @commands.cooldown(2, 10, commands.BucketType.user)
