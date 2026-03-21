@@ -92,8 +92,9 @@ class EmojiSteal(commands.Cog):
         if not reference or not reference.message_id:
             await ctx.send(MISSING_REFERENCE)
             return None
-        message = await ctx.channel.fetch_message(reference.message_id)
-        if not message:
+        try:
+            message = await ctx.channel.fetch_message(reference.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             await ctx.send(MESSAGE_FAIL)
             return None
         if message.stickers:
@@ -157,10 +158,10 @@ class EmojiSteal(commands.Cog):
 
         async with aiohttp.ClientSession() as session:
             for emoji, name in zip_longest(emojis, final_names):
-                if not self.available_emoji_slots(ctx.guild, emoji.animated):
-                    return await ctx.send(EMOJI_SLOTS)
                 if not emoji:
                     break
+                if not self.available_emoji_slots(ctx.guild, emoji.animated):
+                    return await ctx.send(EMOJI_SLOTS)
 
                 try:
                     image = await fetch_emoji_image(session, emoji)
@@ -274,7 +275,7 @@ class EmojiSteal(commands.Cog):
             if attachment.filename.endswith(".zip"):
                 z = zipfile.ZipFile(fp)
                 files = zipfile.ZipFile.namelist(z)
-                file = next(f for f in files if f.endswith(".png"))
+                file = next((f for f in files if f.endswith(".png")), None)
                 if not file:
                     return await ctx.send(STICKER_ATTACHMENT)
                 fp = io.BytesIO(z.read(file))
