@@ -224,18 +224,17 @@ class Kagi(commands.Cog):
             await ctx.send("That message is too long to translate.")
             return
 
-        styled_input = self._apply_rng_style(target, mode_key)
-
         async with ctx.typing():
             try:
-                output = await self._translate(styled_input, target_lang)
+                # Send only the original text to Kagi for style translation
+                output = await self._translate(target, target_lang)
 
                 history_key = (ctx.author.id, mode_key)
                 last = self.last_outputs.get(history_key)
 
+                # If output repeats, retry once without appending any prompt text
                 if last == output:
-                    styled_input = self._apply_rng_style(f"{target}\n\nMake this feel noticeably different.", mode_key)
-                    output = await self._translate(styled_input, target_lang)
+                    output = await self._translate(target, target_lang)
 
                 self.last_outputs[history_key] = output
 
