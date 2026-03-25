@@ -119,6 +119,11 @@ class AddImage(commands.Cog):
         if not directory.is_dir():
             directory.mkdir(exist_ok=True, parents=True)
 
+    async def get_directory(self, guild: Optional[discord.Guild] = None) -> Path:
+        if guild is None:
+            return cog_data_path(self) / "global"
+        return cog_data_path(self) / str(guild.id)
+
     async def get_image(self, alias: str, guild: Optional[discord.Guild] = None) -> dict:
         if guild is None:
             for image in await self.config.images():
@@ -131,9 +136,7 @@ class AddImage(commands.Cog):
         return {}
 
     async def get_image_path(self, image: dict, guild: Optional[discord.Guild] = None) -> Path:
-        if guild is None:
-            return cog_data_path(self) / "global" / image["file_loc"]
-        return cog_data_path(self) / str(guild.id) / image["file_loc"]
+        return await self.get_directory(guild) / image["file_loc"]
 
     async def validate_attachment(self, attachment: discord.Attachment) -> Optional[str]:
         suffix = Path(attachment.filename).suffix.lower()
@@ -322,7 +325,7 @@ class AddImage(commands.Cog):
             if server_id is None:
                 guild = ctx.message.guild
             else:
-                guild = self.bot.get_guild(server_id)
+                guild = server_id
             image_list = await self.config.guild(guild).images()
 
         if image_list == []:
@@ -375,6 +378,12 @@ class AddImage(commands.Cog):
         embed.add_field(name="Scope", value="global" if source_guild is None else f"guild: {source_guild.name}")
         await ctx.send(embed=embed, file=discord.File(path))
 
+    async def get_saved_filenames(self, guild: Optional[discord.Guild] = None) -> set[str]:
+        directory = await self.get_directory(guild)
+        if not directory.exists():
+            return set()
+        return {file.name for file in directory.iterdir() if file.is_file()}
+
     @addimage.command()
     @checks.is_owner()
     async def clear_global(self, ctx: commands.Context) -> None:
@@ -396,10 +405,10 @@ class AddImage(commands.Cog):
         Clear all the images stored for the current server
         """
         await self.config.guild(ctx.guild).images.set([])
-        directory = cog_data_path(self) / str(ctx.guild.id)
-        for file in os.listdir(str(directory)):
+        directory = await self.get_directory(ctx.guild)
+        for file in await self.get_saved_filenames(ctx.guild):
             try:
-                os.remove(str(directory / file))
+                os.remove(directory / file)
             except Exception:
                 log.error("Error deleting image {image}".format(image=file), exc_info=True)
         await ctx.tick()
@@ -411,8 +420,7 @@ class AddImage(commands.Cog):
         Cleanup deleted images that are not supposed to be saved anymore
         """
         images = await self.config.guild(ctx.guild).images()
-        directory = cog_data_path(self) / str(ctx.guild.id)
-        saved = os.listdir(str(directory))
+        saved = await self.get_saved_filenames(ctx.guild)
         cleaned_images = []
         for image in images:
             if image["file_loc"] in saved:
@@ -540,15 +548,15 @@ class AddImage(commands.Cog):
         seed = "".join(random.sample(string.ascii_uppercase + string.digits, k=5))
         filename = "{}-{}".format(seed, msg.attachments[0].filename)
         if guild is not None:
-            directory = cog_data_path(self) / str(guild.id)
+            directory = await self.get_directory(guild)
             cur_images = await self.config.guild(guild).images()
         else:
-            directory = cog_data_path(self) / "global"
+            directory = await self.get_directory()
             cur_images = await self.config.images()
         await self.make_guild_folder(directory)
         name = name.lower()
 
-        file_path = "{}/{}".format(str(directory), filename)
+        file_path = directory / filename
 
         new_entry = {
             "command_name": name,
@@ -569,7 +577,7 @@ class AddImage(commands.Cog):
         while msg is None:
 
             def check(m: discord.Message):
-                return m.author == ctx.author and (m.attachments or "exit" in m.content)
+                return m.author == ctx.author and (m.attachments or m.content.lower().strip() == "exit")
 
             try:
                 msg = await self.bot.wait_for("message", check=check, timeout=60)
@@ -595,9 +603,6 @@ class AddImage(commands.Cog):
         if await self.check_command_exists(name, guild):
             msg = name + " is already in the list, try another!"
             return await ctx.send(msg)
-        else:
-            msg = name + " added as the command!"
-            await ctx.send(msg)
         if ctx.message.attachments == []:
             msg = "Upload an image for me to use! Type `exit` to cancel."
             await ctx.send(msg)
@@ -609,14 +614,13 @@ class AddImage(commands.Cog):
                 await ctx.send(error)
                 return
             await self.save_image_location(file_msg, name, guild)
-            await ctx.send(name + " has been added to my files!")
         else:
             error = await self.validate_attachment(ctx.message.attachments[0])
             if error:
                 await ctx.send(error)
                 return
             await self.save_image_location(ctx.message, name, guild)
-            await ctx.send(name + " has been added to my files!")
+        await ctx.send(name + " has been added to my files!")
 
     @checks.is_owner()
     @addimage.command(name="addglobal")
@@ -632,9 +636,6 @@ class AddImage(commands.Cog):
         if await self.check_command_exists(name, guild):
             msg = name + " is already in the list, try another!"
             return await ctx.send(msg)
-        else:
-            msg = name + " added as the command!"
-            await ctx.send(msg)
         if ctx.message.attachments == []:
             msg = "Upload an image for me to use! Type `exit` to cancel."
             await ctx.send(msg)
@@ -646,11 +647,10 @@ class AddImage(commands.Cog):
                 await ctx.send(error)
                 return
             await self.save_image_location(file_msg, name)
-            await ctx.send(name + " has been added to my files!")
         else:
             error = await self.validate_attachment(ctx.message.attachments[0])
             if error:
                 await ctx.send(error)
                 return
             await self.save_image_location(ctx.message, name)
-            await ctx.send(name + " has been added to my files!")
+        await ctx.send(name + " has been added to my files!")

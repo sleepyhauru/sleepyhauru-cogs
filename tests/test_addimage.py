@@ -1,6 +1,8 @@
 import asyncio
+import shutil
 import types
 import unittest
+from pathlib import Path
 
 from tests.support import load_module
 
@@ -10,9 +12,16 @@ addimage_module = load_module("addimage.addimage")
 
 class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        bot = types.SimpleNamespace(get_command=lambda name: None)
+        bot = types.SimpleNamespace(
+            get_command=lambda name: None,
+            user=types.SimpleNamespace(display_name="Bot", display_avatar="avatar"),
+        )
         self.cog = addimage_module.AddImage(bot)
         self.guild = types.SimpleNamespace(id=123, name="Guild")
+        self.data_dir = Path("/tmp/codex-cog-data") / str(self.guild.id)
+
+    def tearDown(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
 
     async def test_first_word_lowercases_first_token(self):
         self.assertEqual(await self.cog.first_word("Hello There Friend"), "hello")
@@ -99,6 +108,32 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         self.assertEqual(sent, ["Image adding timed out."])
 
+    async def test_wait_for_image_ignores_non_exact_exit_messages(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        first = types.SimpleNamespace(author="user", attachments=[], content="please exit this")
+        second = types.SimpleNamespace(
+            author="user",
+            attachments=[types.SimpleNamespace(filename="image.png", size=100)],
+            content="here",
+        )
+
+        async def wait_for(event, check, timeout):
+            self.assertFalse(check(first))
+            self.assertTrue(check(second))
+            return second
+
+        self.cog.bot.wait_for = wait_for
+        ctx = types.SimpleNamespace(author="user", send=send)
+
+        result = await self.cog.wait_for_image(ctx)
+
+        self.assertIs(result, second)
+        self.assertEqual(sent, [])
+
     async def test_check_command_exists_checks_guild_global_and_bot_commands(self):
         await self.cog.config.guild(self.guild).images.set([{"command_name": "guildimg"}])
         await self.cog.config.images.set([{"command_name": "globalimg"}])
@@ -141,6 +176,87 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         images = await self.cog.config.guild(self.guild).images()
         self.assertEqual(images[0]["command_name"], "newname")
         self.assertEqual(sent, ["Renamed `oldname` to `newname`."])
+
+    async def test_listimages_uses_passed_guild_object(self):
+        captured_pages = []
+
+        async def fake_menu(ctx, pages, controls):
+            captured_pages.extend(pages)
+
+        self.cog.bot.get_guild = lambda guild_id: (_ for _ in ()).throw(
+            AssertionError("get_guild should not be called with a converted guild")
+        )
+        await self.cog.config.guild(self.guild).images.set(
+            [{"command_name": "guildimg", "count": 2, "author": 1, "file_loc": "x.png"}]
+        )
+
+        original_menu = addimage_module.menu
+        addimage_module.menu = fake_menu
+        try:
+            ctx = types.SimpleNamespace(
+                message=types.SimpleNamespace(guild=None, created_at=None),
+                send=lambda *args, **kwargs: None,
+            )
+            await self.cog.listimages(ctx, "guild", self.guild)
+        finally:
+            addimage_module.menu = original_menu
+
+        self.assertEqual(len(captured_pages), 1)
+        self.assertEqual(captured_pages[0].fields[0].name, "guildimg")
+
+    async def test_clear_images_handles_missing_guild_folder(self):
+        ticked = []
+
+        async def tick():
+            ticked.append(True)
+
+        await self.cog.config.guild(self.guild).images.set(
+            [{"command_name": "guildimg", "count": 0, "author": 1, "file_loc": "x.png"}]
+        )
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        ctx = types.SimpleNamespace(guild=self.guild, tick=tick)
+
+        await self.cog.clear_images(ctx)
+
+        self.assertEqual(await self.cog.config.guild(self.guild).images(), [])
+        self.assertEqual(ticked, [True])
+
+    async def test_clean_deleted_images_handles_missing_guild_folder(self):
+        ticked = []
+
+        async def tick():
+            ticked.append(True)
+
+        await self.cog.config.guild(self.guild).images.set(
+            [{"command_name": "guildimg", "count": 0, "author": 1, "file_loc": "x.png"}]
+        )
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+        ctx = types.SimpleNamespace(guild=self.guild, tick=tick)
+
+        await self.cog.clean_deleted_images(ctx)
+
+        self.assertEqual(await self.cog.config.guild(self.guild).images(), [])
+        self.assertEqual(ticked, [True])
+
+    async def test_add_image_guild_does_not_confirm_before_validation(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        self.cog.validate_attachment = lambda attachment: asyncio.sleep(0, result="bad file")
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            message=types.SimpleNamespace(
+                guild=self.guild,
+                attachments=[types.SimpleNamespace(filename="image.png", size=100)],
+            ),
+            send=send,
+        )
+
+        await self.cog.add_image_guild(ctx, "sample")
+
+        self.assertEqual(sent, ["bad file"])
 
 
 if __name__ == "__main__":
