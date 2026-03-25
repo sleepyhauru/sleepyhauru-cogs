@@ -9,7 +9,9 @@ deepfry_module = load_module("deepfry.deepfry")
 
 class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.cog = deepfry_module.Deepfry(types.SimpleNamespace(loop=None))
+        self.loop = types.SimpleNamespace(run_in_executor=lambda executor, func: func())
+        self.bot = types.SimpleNamespace(loop=self.loop, cog_disabled_in_guild=lambda cog, guild: False)
+        self.cog = deepfry_module.Deepfry(self.bot)
 
     def test_valid_path_type_respects_allow_all_types(self):
         self.assertTrue(self.cog._valid_path_type("image.PNG"))
@@ -41,6 +43,20 @@ class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
             "https://example.com/thumb.png",
         )
 
+    def test_get_message_image_url_skips_invalid_attachments_for_valid_ones(self):
+        message = types.SimpleNamespace(
+            attachments=[
+                types.SimpleNamespace(url="https://example.com/readme.txt"),
+                types.SimpleNamespace(url="https://example.com/image.png"),
+            ],
+            embeds=[],
+        )
+
+        self.assertEqual(
+            self.cog._get_message_image_url(message),
+            "https://example.com/image.png",
+        )
+
     async def test_resolve_target_uses_reply_attachment_before_history(self):
         class ReplyOnlyValue:
             async def __call__(self):
@@ -64,6 +80,28 @@ class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
         result = await self.cog._resolve_target(ctx, None, allow_all_types=False)
 
         self.assertEqual(result, ("attachment", ref_attachment, "reply attachment from message 222"))
+
+    async def test_resolve_target_skips_invalid_invoking_attachment(self):
+        class ReplyOnlyValue:
+            async def __call__(self):
+                return False
+
+        self.cog.config.guild = lambda guild: types.SimpleNamespace(replyOnly=ReplyOnlyValue())
+        valid_attachment = types.SimpleNamespace(url="https://example.com/image.png")
+        ctx = types.SimpleNamespace(
+            guild=object(),
+            message=types.SimpleNamespace(
+                attachments=[
+                    types.SimpleNamespace(url="https://example.com/readme.txt"),
+                    valid_attachment,
+                ]
+            ),
+            channel=types.SimpleNamespace(history=lambda **kwargs: None),
+        )
+
+        result = await self.cog._resolve_target(ctx, None, allow_all_types=False)
+
+        self.assertEqual(result, ("attachment", valid_attachment, "invoking message attachment"))
 
     async def test_resolve_target_reply_only_blocks_history_search(self):
         class ReplyOnlyValue:
@@ -110,6 +148,90 @@ class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
             await self.cog._read_attachment_bytes(attachment, filesize_limit=10)
 
         self.assertEqual(str(cm.exception), "That image is too large.")
+
+    async def test_deepfryset_shows_config_without_help(self):
+        class GuildConfig:
+            async def all(self):
+                return {
+                    "allowAllTypes": False,
+                    "replyOnly": True,
+                    "debug": False,
+                    "fryChance": 2,
+                    "nukeChance": 3,
+                }
+
+        sent = []
+        help_called = []
+
+        async def send(message):
+            sent.append(message)
+
+        async def send_help():
+            help_called.append(True)
+
+        self.cog.config.guild = lambda guild: GuildConfig()
+        ctx = types.SimpleNamespace(guild=object(), send=send, send_help=send_help)
+
+        await self.cog.deepfryset(ctx)
+
+        self.assertEqual(help_called, [])
+        self.assertIn("Reply only mode: True", sent[0])
+
+    async def test_on_message_without_command_uses_first_valid_attachment(self):
+        class GuildConfig:
+            async def allowAllTypes(self):
+                return False
+
+            async def fryChance(self):
+                return 1
+
+            async def nukeChance(self):
+                return 0
+
+        sent = []
+        used_attachments = []
+
+        async def send(*, file):
+            sent.append(file)
+
+        def permissions_for(member):
+            return types.SimpleNamespace(attach_files=True)
+
+        async def cog_disabled_in_guild(cog, guild):
+            return False
+
+        async def read_attachment_bytes(attachment, filesize_limit):
+            used_attachments.append(attachment.url)
+            return b"data"
+
+        async def immediate_wait_for(task, timeout):
+            return task
+
+        self.bot.cog_disabled_in_guild = cog_disabled_in_guild
+        self.cog.config.guild = lambda guild: GuildConfig()
+        self.cog._read_attachment_bytes = read_attachment_bytes
+        self.cog._open_image_from_bytes = lambda data: ("img", False, None)
+        self.cog._fry = lambda img: "fried"
+
+        original_wait_for = deepfry_module.asyncio.wait_for
+        deepfry_module.asyncio.wait_for = immediate_wait_for
+        try:
+            msg = types.SimpleNamespace(
+                author=types.SimpleNamespace(bot=False),
+                attachments=[
+                    types.SimpleNamespace(url="https://example.com/readme.txt", size=10),
+                    types.SimpleNamespace(url="https://example.com/image.png", size=10),
+                ],
+                guild=types.SimpleNamespace(filesize_limit=100, me=object()),
+                channel=types.SimpleNamespace(permissions_for=permissions_for, send=send),
+            )
+
+            await self.cog.on_message_without_command(msg)
+        finally:
+            deepfry_module.asyncio.wait_for = original_wait_for
+
+        self.assertEqual(used_attachments, ["https://example.com/image.png"])
+        self.assertEqual(len(sent), 1)
 
 
 if __name__ == "__main__":

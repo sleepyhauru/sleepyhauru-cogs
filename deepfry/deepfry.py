@@ -1,9 +1,9 @@
 import asyncio
 import functools
-import urllib
 from io import BytesIO
 from random import randint
 from typing import Optional, Tuple, Union
+from urllib.parse import urlparse
 
 import aiohttp
 import discord
@@ -66,6 +66,15 @@ class Deepfry(commands.Cog):
             or allow_all_types
         )
 
+    def _get_valid_attachment(
+        self, message: discord.Message, allow_all_types: bool = False
+    ) -> Optional[discord.Attachment]:
+        for attachment in message.attachments:
+            path = urlparse(attachment.url).path
+            if self._valid_path_type(path, allow_all_types):
+                return attachment
+        return None
+
     async def _get_referenced_message(self, ctx) -> Optional[discord.Message]:
         if not ctx.message.reference or not ctx.message.reference.message_id:
             return None
@@ -80,10 +89,9 @@ class Deepfry(commands.Cog):
         allow_all_types: bool = False,
         allow_thumbnail: bool = True,
     ) -> Optional[str]:
-        for attachment in message.attachments:
-            path = urllib.parse.urlparse(attachment.url).path
-            if self._valid_path_type(path, allow_all_types):
-                return attachment.url
+        attachment = self._get_valid_attachment(message, allow_all_types)
+        if attachment is not None:
+            return attachment.url
 
         for embed in message.embeds:
             if embed.image and embed.image.url:
@@ -167,13 +175,15 @@ class Deepfry(commands.Cog):
         if isinstance(link, str) and link:
             return ("url", link, "explicit link")
 
-        if ctx.message.attachments:
-            return ("attachment", ctx.message.attachments[0], "invoking message attachment")
+        invoking_attachment = self._get_valid_attachment(ctx.message, allow_all_types)
+        if invoking_attachment is not None:
+            return ("attachment", invoking_attachment, "invoking message attachment")
 
         ref_msg = await self._get_referenced_message(ctx)
         if ref_msg:
-            if ref_msg.attachments:
-                return ("attachment", ref_msg.attachments[0], f"reply attachment from message {ref_msg.id}")
+            ref_attachment = self._get_valid_attachment(ref_msg, allow_all_types)
+            if ref_attachment is not None:
+                return ("attachment", ref_attachment, f"reply attachment from message {ref_msg.id}")
 
             ref_url = self._get_message_image_url(ref_msg, allow_all_types, allow_thumbnail=True)
             if ref_url:
@@ -185,8 +195,9 @@ class Deepfry(commands.Cog):
             raise ImageFindError("Reply-only mode is enabled. Reply to a message with an image or provide a direct link.")
 
         async for msg in ctx.channel.history(limit=HISTORY_LOOKBACK, before=ctx.message):
-            if msg.attachments:
-                return ("attachment", msg.attachments[0], f"history attachment from message {msg.id}")
+            history_attachment = self._get_valid_attachment(msg, allow_all_types)
+            if history_attachment is not None:
+                return ("attachment", history_attachment, f"history attachment from message {msg.id}")
 
             hist_url = self._get_message_image_url(msg, allow_all_types, allow_thumbnail=True)
             if hist_url:
@@ -231,7 +242,7 @@ class Deepfry(commands.Cog):
 
         if source_type == "url":
             url = source_value
-            path = urllib.parse.urlparse(url).path
+            path = urlparse(url).path
             if not self._valid_path_type(path, allow_all_types):
                 await self._debug(ctx, "URL path had no trusted extension; attempting content sniff anyway.")
             data = await self._read_url_bytes(url, filesize_limit)
@@ -448,7 +459,6 @@ class Deepfry(commands.Cog):
     @commands.group(invoke_without_command=True)
     async def deepfryset(self, ctx):
         """Config options for deepfry."""
-        await ctx.send_help()
         cfg = await self.config.guild(ctx.guild).all()
         msg = (
             "Allow all filetypes: {allowAllTypes}\n"
@@ -582,15 +592,11 @@ class Deepfry(commands.Cog):
         if not msg.channel.permissions_for(msg.guild.me).attach_files:
             return
 
-        attachment = msg.attachments[0]
-        if attachment.size > msg.guild.filesize_limit:
+        allow_all_types = await self.config.guild(msg.guild).allowAllTypes()
+        attachment = self._get_valid_attachment(msg, allow_all_types)
+        if attachment is None:
             return
-
-        path = urllib.parse.urlparse(attachment.url).path.lower()
-        if not (
-            any(path.endswith(x) for x in self.imagetypes)
-            or any(path.endswith(x) for x in self.videotypes)
-        ):
+        if attachment.size > msg.guild.filesize_limit:
             return
 
         try:
