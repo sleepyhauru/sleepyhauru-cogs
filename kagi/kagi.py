@@ -355,7 +355,7 @@ class Kagi(commands.Cog):
 
         await self._send_owner_dm(ctx, result)
 
-    @commands.command(name="linkedin")
+    @commands.hybrid_command(name="linkedin")
     @commands.cooldown(2, 10, commands.BucketType.user)
     async def linkedin(self, ctx: commands.Context, *, text: Optional[str] = None):
         """
@@ -371,7 +371,7 @@ class Kagi(commands.Cog):
             mode_key="linkedin",
         )
 
-    @commands.command(name="genz")
+    @commands.hybrid_command(name="genz")
     @commands.cooldown(2, 10, commands.BucketType.user)
     async def genz(self, ctx: commands.Context, *, text: Optional[str] = None):
         """

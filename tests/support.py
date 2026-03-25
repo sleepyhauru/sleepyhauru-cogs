@@ -280,6 +280,9 @@ def install_stubs():
         def command(*args, **kwargs):
             return _decorator(*args, **kwargs)
 
+        def hybrid_command(*args, **kwargs):
+            return _decorator(*args, **kwargs)
+
         def group(*args, **kwargs):
             def wrap(func):
                 def subcommand_decorator(*dargs, **dkwargs):
@@ -300,6 +303,7 @@ def install_stubs():
         commands.Context = Context
         commands.BucketType = BucketType
         commands.command = command
+        commands.hybrid_command = hybrid_command
         commands.group = group
         commands.is_owner = _decorator
         commands.cooldown = _decorator

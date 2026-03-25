@@ -227,6 +227,26 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1], "Cleared `translate_session`.")
         self.assertEqual(sent[2], "Use `all`, `kagi`, or `translate`.")
 
+    async def test_linkedin_and_genz_commands_delegate_to_shared_runner(self):
+        calls = []
+
+        async def fake_run_style_command(ctx, text, mode_key):
+            calls.append((ctx, text, mode_key))
+
+        self.cog._run_style_command = fake_run_style_command
+        ctx = types.SimpleNamespace()
+
+        await self.cog.linkedin(ctx, text="post this")
+        await self.cog.genz(ctx, text="say this")
+
+        self.assertEqual(
+            calls,
+            [
+                (ctx, "post this", "linkedin"),
+                (ctx, "say this", "genz"),
+            ],
+        )
+
     @staticmethod
     def _async_return(value):
         async def inner(*args, **kwargs):
