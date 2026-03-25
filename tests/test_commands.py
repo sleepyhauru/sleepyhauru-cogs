@@ -84,6 +84,22 @@ class CommandsCogTest(unittest.TestCase):
         bot = types.SimpleNamespace(commands=[self.alpha, self.tools])
         self.cog = commands_module.Commands(bot)
 
+    def test_commands_menu_view_splits_large_cog_lists_into_multiple_selects(self):
+        cog_names = [f"Cog{i:02d}" for i in range(30)]
+
+        view = commands_module.CommandsMenuView(
+            cog=self.cog,
+            author_id=1,
+            prefix="!",
+            cog_names=cog_names,
+        )
+
+        self.assertEqual(len(view.children), 2)
+        self.assertEqual(len(view.children[0].kwargs["options"]), 25)
+        self.assertEqual(len(view.children[1].kwargs["options"]), 5)
+        self.assertEqual(view.children[0].kwargs["placeholder"], "Select a cog... (1/2)")
+        self.assertEqual(view.children[1].kwargs["placeholder"], "Select a cog... (2/2)")
+
     def test_build_cog_lines_includes_sorted_visible_commands(self):
         lines = self.cog._build_cog_lines("!", "Utility")
 
@@ -147,20 +163,38 @@ class CommandsCogAsyncTest(unittest.IsolatedAsyncioTestCase):
         ctx = types.SimpleNamespace(send=send)
 
         await self.cog.commandsset_allow(ctx, cog_name="Misc")
-        await self.cog.commandsset_deny(ctx, cog_name="Games")
-        excluded_before_reset = await self.cog.config.excluded_cogs()
-        await self.cog.commandsset_remove(ctx, cog_name="Misc")
+        await self.cog.commandsset_deny(ctx, cog_name="misc")
+        excluded_before_reset = list(await self.cog.config.excluded_cogs())
+        await self.cog.commandsset_remove(ctx, cog_name="MISC")
         await self.cog.commandsset_reset(ctx)
 
         allowlist = await self.cog.config.allowlist()
         excluded = await self.cog.config.excluded_cogs()
         self.assertEqual(allowlist, [])
-        self.assertIn("Games", excluded_before_reset)
-        self.assertNotIn("Games", excluded)
+        self.assertIn("Misc", excluded_before_reset)
+        self.assertNotIn("Misc", excluded)
         self.assertEqual(sent[0], "Added `Misc` to the allowlist.")
-        self.assertEqual(sent[1], "Excluded `Games` from auto-discovery.")
+        self.assertEqual(
+            sent[1],
+            "Excluded `Misc` from auto-discovery and removed it from the allowlist.",
+        )
         self.assertEqual(sent[2], "Removed `Misc` from commands menu overrides.")
         self.assertEqual(sent[3], "Reset commands menu config to auto-discovery defaults.")
+
+    async def test_commandsset_allow_removes_matching_exclusion_case_insensitively(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await self.cog.config.excluded_cogs.set(["Alias", "misc"])
+        ctx = types.SimpleNamespace(send=send)
+
+        await self.cog.commandsset_allow(ctx, cog_name="Misc")
+
+        self.assertEqual(await self.cog.config.allowlist(), ["Misc"])
+        self.assertEqual(await self.cog.config.excluded_cogs(), ["Alias"])
+        self.assertEqual(sent, ["Added `Misc` to the allowlist and removed it from exclusions."])
 
 
 if __name__ == "__main__":

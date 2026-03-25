@@ -3,15 +3,21 @@ from discord.ui import Select, View
 from redbot.core import Config, commands
 from typing import List, Optional, Set
 
+DEFAULT_EXCLUDED_COGS = ["Alias", "Audio", "Commands", "Core", "Dev", "Downloader", "Help"]
+MAX_SELECT_OPTIONS = 25
+
 
 class CommandsMenuSelect(Select):
-    def __init__(self, cog_names: List[str]):
+    def __init__(self, cog_names: List[str], *, index: int, total: int):
         options = [
             discord.SelectOption(label=cog_name, value=cog_name)
             for cog_name in cog_names
         ]
+        placeholder = "Select a cog..."
+        if total > 1:
+            placeholder = f"Select a cog... ({index}/{total})"
         super().__init__(
-            placeholder="Select a cog...",
+            placeholder=placeholder,
             min_values=1,
             max_values=1,
             options=options,
@@ -41,7 +47,10 @@ class CommandsMenuView(View):
         self.author_id = author_id
         self.prefix = prefix
         self.message: Optional[discord.Message] = None
-        self.add_item(CommandsMenuSelect(cog_names))
+        chunks = [cog_names[i : i + MAX_SELECT_OPTIONS] for i in range(0, len(cog_names), MAX_SELECT_OPTIONS)]
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            self.add_item(CommandsMenuSelect(chunk, index=index, total=total))
 
     async def on_timeout(self):
         for item in self.children:
@@ -61,8 +70,22 @@ class Commands(commands.Cog):
         self.config = Config.get_conf(self, identifier=183040001, force_registration=True)
         self.config.register_global(
             allowlist=[],
-            excluded_cogs=["Alias", "Audio", "Commands", "Core", "Dev", "Downloader", "Help"],
+            excluded_cogs=list(DEFAULT_EXCLUDED_COGS),
         )
+
+    def _known_cog_names(self) -> List[str]:
+        return sorted({getattr(cmd, "cog_name", None) for cmd in self.bot.commands if getattr(cmd, "cog_name", None)})
+
+    def _canonical_cog_name(self, cog_name: str, *collections: List[str]) -> str:
+        requested = cog_name.strip()
+        lowered = requested.casefold()
+
+        for names in collections:
+            for existing in names:
+                if existing.casefold() == lowered:
+                    return existing
+
+        return requested
 
     def _visible_root_commands_for_cog(self, cog_name: str) -> List[commands.Command]:
         cmds = []
@@ -131,7 +154,7 @@ class Commands(commands.Cog):
             return names
 
         names = []
-        for cog_name in sorted({getattr(cmd, "cog_name", None) for cmd in self.bot.commands if getattr(cmd, "cog_name", None)}):
+        for cog_name in self._known_cog_names():
             if cog_name in excluded:
                 continue
             if self._build_cog_lines(prefix, cog_name):
@@ -147,7 +170,7 @@ class Commands(commands.Cog):
 
         description = (
             f"Use `{prefix}help <command>` for detailed help.\n\n"
-            f"Select a category from the dropdown below.\n\n"
+            f"Select a category from the dropdown menu below.\n\n"
             f"{chr(10).join(lines) if lines else 'No command categories available.'}"
         )
 
@@ -231,23 +254,53 @@ class Commands(commands.Cog):
     async def commandsset_allow(self, ctx: commands.Context, *, cog_name: str):
         """Add a cog to the explicit allowlist."""
         allowlist = await self.config.allowlist()
-        if cog_name in allowlist:
+        excluded = await self.config.excluded_cogs()
+        cog_name = self._canonical_cog_name(cog_name, self._known_cog_names(), allowlist, excluded)
+
+        if any(existing.casefold() == cog_name.casefold() for existing in allowlist):
             await ctx.send(f"`{cog_name}` is already in the allowlist.")
             return
+
+        removed_from_excluded = False
+        for existing in list(excluded):
+            if existing.casefold() == cog_name.casefold():
+                excluded.remove(existing)
+                removed_from_excluded = True
+        if removed_from_excluded:
+            await self.config.excluded_cogs.set(excluded)
+
         allowlist.append(cog_name)
         await self.config.allowlist.set(allowlist)
+        if removed_from_excluded:
+            await ctx.send(f"Added `{cog_name}` to the allowlist and removed it from exclusions.")
+            return
         await ctx.send(f"Added `{cog_name}` to the allowlist.")
 
     @commandsset.command(name="deny")
     @commands.is_owner()
     async def commandsset_deny(self, ctx: commands.Context, *, cog_name: str):
         """Exclude a cog from auto-discovery mode."""
+        allowlist = await self.config.allowlist()
         excluded = await self.config.excluded_cogs()
-        if cog_name in excluded:
+        cog_name = self._canonical_cog_name(cog_name, self._known_cog_names(), excluded, allowlist)
+
+        if any(existing.casefold() == cog_name.casefold() for existing in excluded):
             await ctx.send(f"`{cog_name}` is already excluded.")
             return
+
+        removed_from_allowlist = False
+        for existing in list(allowlist):
+            if existing.casefold() == cog_name.casefold():
+                allowlist.remove(existing)
+                removed_from_allowlist = True
+        if removed_from_allowlist:
+            await self.config.allowlist.set(allowlist)
+
         excluded.append(cog_name)
         await self.config.excluded_cogs.set(excluded)
+        if removed_from_allowlist:
+            await ctx.send(f"Excluded `{cog_name}` from auto-discovery and removed it from the allowlist.")
+            return
         await ctx.send(f"Excluded `{cog_name}` from auto-discovery.")
 
     @commandsset.command(name="remove")
@@ -256,15 +309,22 @@ class Commands(commands.Cog):
         """Remove a cog from the allowlist and exclusion list."""
         allowlist = await self.config.allowlist()
         excluded = await self.config.excluded_cogs()
+        cog_name = self._canonical_cog_name(cog_name, self._known_cog_names(), allowlist, excluded)
         changed = False
 
-        if cog_name in allowlist:
-            allowlist.remove(cog_name)
+        for existing in list(allowlist):
+            if existing.casefold() == cog_name.casefold():
+                allowlist.remove(existing)
+                changed = True
+        if changed:
             await self.config.allowlist.set(allowlist)
-            changed = True
 
-        if cog_name in excluded:
-            excluded.remove(cog_name)
+        removed_from_excluded = False
+        for existing in list(excluded):
+            if existing.casefold() == cog_name.casefold():
+                excluded.remove(existing)
+                removed_from_excluded = True
+        if removed_from_excluded:
             await self.config.excluded_cogs.set(excluded)
             changed = True
 
@@ -278,5 +338,5 @@ class Commands(commands.Cog):
     async def commandsset_reset(self, ctx: commands.Context):
         """Reset commands menu config back to auto-discovery defaults."""
         await self.config.allowlist.set([])
-        await self.config.excluded_cogs.set(["Alias", "Audio", "Commands", "Core", "Dev", "Downloader", "Help"])
+        await self.config.excluded_cogs.set(list(DEFAULT_EXCLUDED_COGS))
         await ctx.send("Reset commands menu config to auto-discovery defaults.")
