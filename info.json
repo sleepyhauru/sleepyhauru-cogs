@@ -1,5 +1,6 @@
 {
-	"author" : ["sleepyhauru"],
-	"name" : "sleepyhauru",
-	"short" : "sleepyhauru"
+    "author": ["sleepyhauru"],
+    "name": "sleepyhauru-cogs",
+    "short": "Utility and fun cogs for Red Discord Bot",
+    "description": "A collection of Red Discord Bot cogs including emoji tools, image utilities, voice logging, Kagi integration, and 7TV uploads."
 }
