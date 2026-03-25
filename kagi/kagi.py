@@ -14,6 +14,31 @@ class Kagi(commands.Cog):
     __version__ = "2.1.0"
 
     API_URL = "https://translate.kagi.com/api/translate"
+    MAX_MESSAGE_LENGTH = 2000
+    STYLE_CONFIGS = {
+        "linkedin": {
+            "target_lang": "linkedin",
+            "missing_text_message": (
+                "Provide text after `!linkedin` or reply to a message with `!linkedin`."
+            ),
+            "rng_prompts": [
+                "Rewrite this in corporate LinkedIn tone.",
+                "Make this extremely over-the-top LinkedIn influencer cringe.",
+                "Rewrite this as a humblebrag LinkedIn post.",
+                "Rewrite this like a startup founder giving motivational insight.",
+            ],
+        },
+        "genz": {
+            "target_lang": "gen_z",
+            "missing_text_message": "Provide text after `!genz` or reply to a message with `!genz`.",
+            "rng_prompts": [
+                "Rewrite this in casual Gen Z style.",
+                "Rewrite this in exaggerated Gen Z slang.",
+                "Rewrite this like someone extremely online.",
+                "Rewrite this in dry, deadpan Gen Z humor.",
+            ],
+        },
+    }
 
     def __init__(self, bot):
         self.bot = bot
@@ -25,10 +50,10 @@ class Kagi(commands.Cog):
             model="standard",
         )
 
-        self.last_outputs = {}
         self.config_dm_notice = (
             "For safety, send this command to me in DMs instead of a server channel."
         )
+        self.session = None
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         base = super().format_help_for_context(ctx)
@@ -36,6 +61,10 @@ class Kagi(commands.Cog):
 
     async def red_delete_data_for_user(self, **kwargs):
         return
+
+    def cog_unload(self):
+        if self.session is not None and not getattr(self.session, "closed", False):
+            self.bot.loop.create_task(self.session.close())
 
     async def _get_auth(self) -> tuple[str, str]:
         kagi_session = await self.config.kagi_session()
@@ -55,27 +84,62 @@ class Kagi(commands.Cog):
         except Exception:
             return text
 
-    def _apply_rng_style(self, text: str, mode: str) -> str:
-        linkedin_styles = [
-            "Rewrite this in corporate LinkedIn tone.",
-            "Make this extremely over-the-top LinkedIn influencer cringe.",
-            "Rewrite this as a humblebrag LinkedIn post.",
-            "Rewrite this like a startup founder giving motivational insight.",
-        ]
+    def _build_styled_input(self, text: str, mode_key: str) -> str:
+        config = self.STYLE_CONFIGS[mode_key]
+        prompt = random.choice(config["rng_prompts"])
+        return f"{text}\n\n{prompt}"
 
-        genz_styles = [
-            "Rewrite this in casual Gen Z style.",
-            "Rewrite this in exaggerated Gen Z slang.",
-            "Rewrite this like someone extremely online.",
-            "Rewrite this in dry, deadpan Gen Z humor.",
-        ]
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self.session is None or getattr(self.session, "closed", False):
+            timeout = aiohttp.ClientTimeout(total=60)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+        return self.session
 
-        if mode == "linkedin":
-            style = random.choice(linkedin_styles)
-        else:
-            style = random.choice(genz_styles)
+    def _build_payload(self, text: str, to_lang: str, model: str, translate_session: str) -> dict:
+        return {
+            "text": text,
+            "from": "en_us",
+            "to": to_lang,
+            "stream": True,
+            "formality": "default",
+            "speaker_gender": "unknown",
+            "addressee_gender": "unknown",
+            "language_complexity": "standard",
+            "translation_style": "natural",
+            "context": "",
+            "model": model,
+            "session_token": translate_session,
+            "dictionary_language": "en",
+            "use_definition_context": True,
+            "enable_language_features": False,
+        }
 
-        return f"{text}\n\n{style}"
+    async def _collect_stream_text(self, resp) -> str:
+        parts = []
+
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line or not line.startswith("data: "):
+                continue
+
+            try:
+                event = json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+
+            if "delta" in event:
+                parts.append(event["delta"])
+
+            if event.get("done") is True:
+                break
+
+        final_text = "".join(parts).strip()
+        final_text = self._fix_mojibake(final_text)
+
+        if not final_text:
+            raise RuntimeError("No translated output was returned.")
+
+        return final_text
 
     async def _translate(self, text: str, to_lang: str) -> str:
         kagi_session, translate_session = await self._get_auth()
@@ -94,66 +158,51 @@ class Kagi(commands.Cog):
             "kagi_session": kagi_session,
             "translate_session": translate_session,
         }
+        payload = self._build_payload(text, to_lang, model, translate_session)
+        session = await self._get_session()
 
-        payload = {
-            "text": text,
-            "from": "en_us",
-            "to": to_lang,
-            "stream": True,
-            "formality": "default",
-            "speaker_gender": "unknown",
-            "addressee_gender": "unknown",
-            "language_complexity": "standard",
-            "translation_style": "natural",
-            "context": "",
-            "model": model,
-            "session_token": translate_session,
-            "dictionary_language": "en",
-            "use_definition_context": True,
-            "enable_language_features": False,
-        }
+        async with session.post(self.API_URL, headers=headers, cookies=cookies, json=payload) as resp:
+            if resp.status == 401:
+                raise RuntimeError("Authentication failed. Your Kagi session values may be expired.")
+            if resp.status == 403:
+                raise RuntimeError("Access denied by Kagi.")
+            if resp.status != 200:
+                body = await resp.text()
+                raise RuntimeError(f"Kagi returned HTTP {resp.status}: {body[:300]}")
 
-        timeout = aiohttp.ClientTimeout(total=60)
-        parts = []
+            content_type = resp.headers.get("Content-Type", "")
+            if "text/event-stream" not in content_type:
+                body = await resp.text()
+                raise RuntimeError(f"Unexpected response type: {content_type}\n{body[:300]}")
 
-        async with aiohttp.ClientSession(timeout=timeout, cookies=cookies) as session:
-            async with session.post(self.API_URL, headers=headers, json=payload) as resp:
-                if resp.status == 401:
-                    raise RuntimeError("Authentication failed. Your Kagi session values may be expired.")
-                if resp.status == 403:
-                    raise RuntimeError("Access denied by Kagi.")
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise RuntimeError(f"Kagi returned HTTP {resp.status}: {body[:300]}")
+            return await self._collect_stream_text(resp)
 
-                content_type = resp.headers.get("Content-Type", "")
-                if "text/event-stream" not in content_type:
-                    body = await resp.text()
-                    raise RuntimeError(f"Unexpected response type: {content_type}\n{body[:300]}")
+    def _extract_message_text(self, message: discord.Message) -> Optional[str]:
+        if message.content and message.content.strip():
+            return message.content.strip()
 
-                async for raw_line in resp.content:
-                    line = raw_line.decode("utf-8", errors="ignore").strip()
-                    if not line or not line.startswith("data: "):
-                        continue
+        if not message.embeds:
+            return None
 
-                    try:
-                        event = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
+        embed_text_parts = []
+        for embed in message.embeds:
+            if embed.title:
+                embed_text_parts.append(embed.title)
+            if embed.description:
+                embed_text_parts.append(embed.description)
+            for field in embed.fields:
+                if field.name:
+                    embed_text_parts.append(field.name)
+                if field.value:
+                    embed_text_parts.append(field.value)
 
-                    if "delta" in event:
-                        parts.append(event["delta"])
+        combined = "\n".join(part for part in embed_text_parts if part and part.strip()).strip()
+        return combined or None
 
-                    if event.get("done") is True:
-                        break
-
-        final_text = "".join(parts).strip()
-        final_text = self._fix_mojibake(final_text)
-
-        if not final_text:
-            raise RuntimeError("No translated output was returned.")
-
-        return final_text
+    async def _send_output(self, ctx: commands.Context, output: str):
+        for start in range(0, len(output), self.MAX_MESSAGE_LENGTH):
+            chunk = output[start : start + self.MAX_MESSAGE_LENGTH]
+            await ctx.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     async def _get_text(self, ctx: commands.Context, text: Optional[str]) -> Optional[str]:
         if text and text.strip():
@@ -165,47 +214,20 @@ class Kagi(commands.Cog):
 
         resolved = ref.resolved
         if isinstance(resolved, discord.Message):
-            if resolved.content and resolved.content.strip():
-                return resolved.content.strip()
-
-            if resolved.embeds:
-                embed_text_parts = []
-                for embed in resolved.embeds:
-                    if embed.title:
-                        embed_text_parts.append(embed.title)
-                    if embed.description:
-                        embed_text_parts.append(embed.description)
-                    for field in embed.fields:
-                        if field.name:
-                            embed_text_parts.append(field.name)
-                        if field.value:
-                            embed_text_parts.append(field.value)
-
-                combined = "\n".join(part for part in embed_text_parts if part and part.strip()).strip()
-                if combined:
-                    return combined
-
-            return None
+            return self._extract_message_text(resolved)
 
         if ref.message_id:
             try:
                 replied_message = await ctx.channel.fetch_message(ref.message_id)
-                if replied_message.content and replied_message.content.strip():
-                    return replied_message.content.strip()
+                return self._extract_message_text(replied_message)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 return None
 
         return None
 
-    async def _run_style_command(
-        self,
-        ctx: commands.Context,
-        text: Optional[str],
-        mode_key: str,
-        target_lang: str,
-        missing_text_message: str,
-    ):
+    async def _run_style_command(self, ctx: commands.Context, text: Optional[str], mode_key: str):
         kagi_session, translate_session = await self._get_auth()
+        config = self.STYLE_CONFIGS[mode_key]
 
         if not kagi_session or not translate_session:
             await ctx.send(
@@ -217,32 +239,22 @@ class Kagi(commands.Cog):
 
         target = await self._get_text(ctx, text)
         if not target:
-            await ctx.send(missing_text_message)
+            await ctx.send(config["missing_text_message"])
             return
 
         if len(target) > 4000:
             await ctx.send("That message is too long to translate.")
             return
 
+        styled_input = self._build_styled_input(target, mode_key)
         async with ctx.typing():
             try:
-                # Send only the original text to Kagi for style translation
-                output = await self._translate(target, target_lang)
-
-                history_key = (ctx.author.id, mode_key)
-                last = self.last_outputs.get(history_key)
-
-                # If output repeats, retry once without appending any prompt text
-                if last == output:
-                    output = await self._translate(target, target_lang)
-
-                self.last_outputs[history_key] = output
-
+                output = await self._translate(styled_input, config["target_lang"])
             except Exception as e:
                 await ctx.send(f"Error: {e}")
                 return
 
-        await ctx.send(output, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_output(ctx, output)
 
     async def _send_owner_dm(self, ctx: commands.Context, message: str):
         try:
@@ -357,8 +369,6 @@ class Kagi(commands.Cog):
             ctx=ctx,
             text=text,
             mode_key="linkedin",
-            target_lang="linkedin",
-            missing_text_message="Provide text after `!linkedin` or reply to a message with `!linkedin`.",
         )
 
     @commands.command(name="genz")
@@ -375,6 +385,4 @@ class Kagi(commands.Cog):
             ctx=ctx,
             text=text,
             mode_key="genz",
-            target_lang="gen_z",
-            missing_text_message="Provide text after `!genz` or reply to a message with `!genz`.",
         )
