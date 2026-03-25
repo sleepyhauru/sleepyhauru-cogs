@@ -11,6 +11,8 @@ IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 STICKER_KB = 512
 STICKER_DIM = 320
 STICKER_TIME = 5
+MAX_STICKER_ARCHIVE_RATIO = 20
+MAX_STICKER_ARCHIVE_FILES = 25
 
 MISSING_EMOJIS = "Can't find emojis or stickers in that message."
 MISSING_REFERENCE = "Reply to a message with this command to steal an emoji."
@@ -96,6 +98,47 @@ class EmojiSteal(commands.Cog):
     def _join_names(names: Sequence[str]) -> str:
         return ", ".join(names)
 
+    @staticmethod
+    def _validate_sticker_archive_entry(info: zipfile.ZipInfo) -> bool:
+        filename = info.filename
+        path_parts = filename.replace("\\", "/").split("/")
+        if info.is_dir():
+            return False
+        if filename.startswith(("/", "\\")):
+            return False
+        if any(part == ".." for part in path_parts):
+            return False
+        return True
+
+    def _extract_sticker_png_from_zip(self, fp: io.BytesIO) -> Optional[io.BytesIO]:
+        fp.seek(0)
+        with zipfile.ZipFile(fp) as archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_STICKER_ARCHIVE_FILES:
+                raise ValueError(STICKER_TOO_BIG)
+
+            png_infos = []
+            for info in infos:
+                if not self._validate_sticker_archive_entry(info):
+                    raise ValueError(STICKER_ATTACHMENT)
+                if info.filename.lower().endswith(".png"):
+                    png_infos.append(info)
+
+            if len(png_infos) != 1:
+                raise ValueError(STICKER_ATTACHMENT)
+
+            info = png_infos[0]
+            if info.file_size > STICKER_KB * 1024:
+                raise ValueError(STICKER_TOO_BIG)
+            if info.compress_size <= 0:
+                raise ValueError(STICKER_ATTACHMENT)
+            if info.file_size > info.compress_size * MAX_STICKER_ARCHIVE_RATIO:
+                raise ValueError(STICKER_TOO_BIG)
+
+            png_fp = io.BytesIO(archive.read(info))
+            png_fp.seek(0)
+            return png_fp
+
     async def _upload_emojis(
         self,
         guild: discord.Guild,
@@ -140,6 +183,7 @@ class EmojiSteal(commands.Cog):
             fp = io.BytesIO()
             try:
                 await sticker.save(fp)
+                fp.seek(0)
                 await guild.create_sticker(
                     name=custom_name or sticker.name,
                     description=STICKER_DESC,
@@ -333,31 +377,31 @@ class EmojiSteal(commands.Cog):
         if len(ctx.guild.stickers) >= ctx.guild.sticker_limit:
             return await ctx.send(content=STICKER_SLOTS)
 
-        if not ctx.message.attachments or not ctx.message.attachments[0].filename.endswith((".png", ".zip")):
+        if not ctx.message.attachments:
             return await ctx.send(STICKER_ATTACHMENT)
 
         attachment = ctx.message.attachments[0]
+        filename = attachment.filename.lower()
+        if not filename.endswith((".png", ".zip")):
+            return await ctx.send(STICKER_ATTACHMENT)
         if attachment.size > STICKER_KB * 1024 or attachment.width and attachment.width > STICKER_DIM or attachment.height and attachment.height > STICKER_DIM:
             return await ctx.send(STICKER_TOO_BIG)
 
         await ctx.typing()
-        name = name or attachment.filename.split('.')[0]
+        name = name or attachment.filename.rsplit(".", 1)[0]
         fp = io.BytesIO()
 
         try:
             await attachment.save(fp)
+            fp.seek(0)
 
-            if attachment.filename.endswith(".zip"):
-                z = zipfile.ZipFile(fp)
-                files = zipfile.ZipFile.namelist(z)
-                file = next((f for f in files if f.endswith(".png")), None)
-                if not file:
-                    return await ctx.send(STICKER_ATTACHMENT)
-                fp = io.BytesIO(z.read(file))
-
+            if filename.endswith(".zip"):
+                fp = self._extract_sticker_png_from_zip(fp)
             sticker = await ctx.guild.create_sticker(
                 name=name, description=f"{UPLOADED_BY} {ctx.author}", emoji=STICKER_EMOJI, file=discord.File(fp))
 
+        except ValueError as error:
+            return await ctx.send(str(error))
         except (discord.DiscordException, zipfile.BadZipFile) as error:
             if "exceed" in str(error):
                 return await ctx.send(STICKER_TOO_BIG)

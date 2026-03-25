@@ -1,5 +1,7 @@
 import types
 import unittest
+import zipfile
+from io import BytesIO
 
 from tests.support import load_module
 
@@ -131,6 +133,210 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
         sent.clear()
         await self.cog.getemoji(ctx, emoji="not an emoji")
         self.assertEqual(sent, [emojisteal_module.INVALID_EMOJI])
+
+    async def test_upload_stickers_rewinds_file_before_upload(self):
+        StickerItem = load_module("discord").StickerItem
+
+        class FakeSticker(StickerItem):
+            def __init__(self, name):
+                self.name = name
+
+            async def save(self, fp):
+                fp.write(b"sticker-bytes")
+
+        seen_positions = []
+
+        async def create_sticker(**kwargs):
+            seen_positions.append(kwargs["file"].fp.tell())
+            return types.SimpleNamespace(name=kwargs["name"])
+
+        guild = types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker)
+
+        uploaded, error = await self.cog._upload_stickers(guild, [FakeSticker("wave")])
+
+        self.assertEqual(uploaded, ["wave"])
+        self.assertIsNone(error)
+        self.assertEqual(seen_positions, [0])
+
+    async def test_uploadsticker_accepts_uppercase_zip_and_png_inside(self):
+        sent = []
+        captured = {}
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("STICKER.PNG", b"png-data")
+        zip_bytes = zip_buffer.getvalue()
+
+        async def send(content=None):
+            sent.append(content)
+
+        async def typing():
+            return None
+
+        async def save(fp):
+            fp.write(zip_bytes)
+
+        async def create_sticker(**kwargs):
+            captured["name"] = kwargs["name"]
+            captured["position"] = kwargs["file"].fp.tell()
+            return types.SimpleNamespace(name=kwargs["name"])
+
+        attachment = types.SimpleNamespace(
+            filename="fun.sticker.ZIP",
+            size=len(zip_bytes),
+            width=None,
+            height=None,
+            save=save,
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            message=types.SimpleNamespace(attachments=[attachment]),
+            author="tester",
+            send=send,
+            typing=typing,
+        )
+
+        await self.cog.uploadsticker(ctx)
+
+        self.assertEqual(captured["name"], "fun.sticker")
+        self.assertEqual(captured["position"], 0)
+        self.assertEqual(sent, [f"{emojisteal_module.STICKER_SUCCESS}: fun.sticker"])
+
+    async def test_uploadsticker_rejects_non_sticker_attachment_case_insensitively(self):
+        sent = []
+
+        async def send(content=None):
+            sent.append(content)
+
+        attachment = types.SimpleNamespace(
+            filename="notes.TXT",
+            size=10,
+            width=None,
+            height=None,
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(stickers=[], sticker_limit=5),
+            message=types.SimpleNamespace(attachments=[attachment]),
+            send=send,
+        )
+
+        await self.cog.uploadsticker(ctx)
+
+        self.assertEqual(sent, [emojisteal_module.STICKER_ATTACHMENT])
+
+    async def test_uploadsticker_rejects_zip_with_multiple_pngs(self):
+        sent = []
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("one.png", b"a")
+            zf.writestr("two.png", b"b")
+        zip_bytes = zip_buffer.getvalue()
+
+        async def send(content=None):
+            sent.append(content)
+
+        async def typing():
+            return None
+
+        async def save(fp):
+            fp.write(zip_bytes)
+
+        async def create_sticker(**kwargs):
+            raise AssertionError("create_sticker should not be called for invalid zip")
+
+        attachment = types.SimpleNamespace(
+            filename="multi.zip",
+            size=len(zip_bytes),
+            width=None,
+            height=None,
+            save=save,
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            message=types.SimpleNamespace(attachments=[attachment]),
+            author="tester",
+            send=send,
+            typing=typing,
+        )
+
+        await self.cog.uploadsticker(ctx)
+
+        self.assertEqual(sent, [emojisteal_module.STICKER_ATTACHMENT])
+
+    async def test_uploadsticker_rejects_zip_with_suspicious_path(self):
+        sent = []
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("../evil.png", b"a")
+        zip_bytes = zip_buffer.getvalue()
+
+        async def send(content=None):
+            sent.append(content)
+
+        async def typing():
+            return None
+
+        async def save(fp):
+            fp.write(zip_bytes)
+
+        async def create_sticker(**kwargs):
+            raise AssertionError("create_sticker should not be called for invalid zip")
+
+        attachment = types.SimpleNamespace(
+            filename="bad.zip",
+            size=len(zip_bytes),
+            width=None,
+            height=None,
+            save=save,
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            message=types.SimpleNamespace(attachments=[attachment]),
+            author="tester",
+            send=send,
+            typing=typing,
+        )
+
+        await self.cog.uploadsticker(ctx)
+
+        self.assertEqual(sent, [emojisteal_module.STICKER_ATTACHMENT])
+
+    async def test_uploadsticker_rejects_zip_with_oversized_png_payload(self):
+        sent = []
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("large.png", b"a" * (emojisteal_module.STICKER_KB * 1024 + 1))
+        zip_bytes = zip_buffer.getvalue()
+
+        async def send(content=None):
+            sent.append(content)
+
+        async def typing():
+            return None
+
+        async def save(fp):
+            fp.write(zip_bytes)
+
+        async def create_sticker(**kwargs):
+            raise AssertionError("create_sticker should not be called for oversized zip payload")
+
+        attachment = types.SimpleNamespace(
+            filename="large.zip",
+            size=len(zip_bytes),
+            width=None,
+            height=None,
+            save=save,
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            message=types.SimpleNamespace(attachments=[attachment]),
+            author="tester",
+            send=send,
+            typing=typing,
+        )
+
+        await self.cog.uploadsticker(ctx)
+
+        self.assertEqual(sent, [emojisteal_module.STICKER_TOO_BIG])
 
 
 if __name__ == "__main__":
