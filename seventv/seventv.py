@@ -2,15 +2,26 @@ import aiohttp
 import discord
 import io
 import re
+from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Any
 
 from redbot.core import commands
 
 
+DISCORD_EMOJI_SIZE_LIMIT = 256 * 1024
+ASSET_EXTENSIONS = ("gif", "png", "webp")
+ASSET_SIZES = ("4x", "3x", "2x", "1x")
+SEVENTV_V3_EMOTE_URL = "https://7tv.io/v3/emotes/{emote_id}"
+SEVENTV_V2_EMOTE_URL = "https://api.7tv.app/v2/emotes/{emote_id}"
+SEVENTV_CDN_URL = "https://cdn.7tv.app/emote/{emote_id}/{asset_name}"
+
 EMOJI_SLOTS = "This server doesn't have any more space for emojis!"
 EMOJI_FAIL = "Failed to upload emoji"
 INVALID_LINK = "Please provide a valid 7TV emote link."
 FETCH_FAIL = "Couldn't fetch the 7TV emote asset."
+FETCH_FAIL_TOO_LARGE = "The 7TV emote exists, but no asset fit within Discord's 256 KiB emoji limit."
+FETCH_FAIL_WEBP = "The 7TV emote was only available as WEBP, and conversion to a Discord-safe format failed."
+INFO_FAIL = "Couldn't load 7TV emote details."
 
 
 ID_PATTERNS = (
@@ -37,25 +48,46 @@ def _available_emoji_slots(guild: discord.Guild, animated: bool) -> int:
 HEADERS = {"User-Agent": "Mozilla/5.0 Red-DiscordBot-SevenTV/1.0"}
 
 
-async def _fetch_7tv_meta(session: aiohttp.ClientSession, emote_id: str) -> Tuple[Optional[str], Optional[bool]]:
+@dataclass
+class AssetResult:
+    data: Optional[bytes]
+    is_animated: Optional[bool]
+    ext: Optional[str]
+    reason: Optional[str] = None
+
+
+def _extract_meta_fields(data: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[bool]]:
+    if not isinstance(data, dict):
+        return None, None
+    return data.get("name"), data.get("animated")
+
+
+async def _fetch_7tv_v3_emote(session: aiohttp.ClientSession, emote_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        async with session.get(SEVENTV_V3_EMOTE_URL.format(emote_id=emote_id), headers=HEADERS) as resp:
+            if resp.status == 200:
+                return await resp.json()
+    except aiohttp.ClientError:
+        pass
+    return None
+
+
+async def _fetch_7tv_meta(
+    session: aiohttp.ClientSession, emote_id: str, v3_data: Optional[Dict[str, Any]] = None
+) -> Tuple[Optional[str], Optional[bool]]:
     """Return (name, animated) if available via 7TV API; tolerate failures.
 
     Tries v3 API first, then v2 as fallback. Returns (None, None) on failure.
     """
-    # v3
-    try:
-        async with session.get(f"https://7tv.io/v3/emotes/{emote_id}", headers=HEADERS) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                name = data.get("name")
-                animated = data.get("animated")
-                return name, animated
-    except aiohttp.ClientError:
-        pass
+    if v3_data is None:
+        v3_data = await _fetch_7tv_v3_emote(session, emote_id)
+    name, animated = _extract_meta_fields(v3_data)
+    if name is not None or animated is not None:
+        return name, animated
 
     # v2 fallback
     try:
-        async with session.get(f"https://api.7tv.app/v2/emotes/{emote_id}", headers=HEADERS) as resp:
+        async with session.get(SEVENTV_V2_EMOTE_URL.format(emote_id=emote_id), headers=HEADERS) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 name = data.get("name")
@@ -67,24 +99,24 @@ async def _fetch_7tv_meta(session: aiohttp.ClientSession, emote_id: str) -> Tupl
     return None, None
 
 
-async def _fetch_7tv_asset_via_meta(session: aiohttp.ClientSession, emote_id: str) -> Tuple[Optional[bytes], Optional[bool], Optional[str]]:
+async def _fetch_7tv_asset_via_meta(
+    session: aiohttp.ClientSession,
+    emote_id: str,
+    v3_data: Optional[Dict[str, Any]] = None,
+) -> AssetResult:
     """Use 7TV v3 metadata to choose a concrete asset URL and download it.
 
-    Returns (bytes, is_animated, ext) or (None, None, None) if unavailable.
+    Returns an AssetResult describing the best candidate under Discord's size limit.
     """
-    try:
-        async with session.get(f"https://7tv.io/v3/emotes/{emote_id}", headers=HEADERS) as resp:
-            if resp.status != 200:
-                return None, None, None
-            data: Dict[str, Any] = await resp.json()
-    except aiohttp.ClientError:
-        return None, None, None
+    data = v3_data or await _fetch_7tv_v3_emote(session, emote_id)
+    if not data:
+        return AssetResult(None, None, None, reason="unavailable")
 
     host = data.get("host") or {}
     base_url = host.get("url") or ""
     files = host.get("files") or []
     if not isinstance(files, list) or not base_url:
-        return None, None, None
+        return AssetResult(None, None, None, reason="unavailable")
 
     # Ensure absolute URL
     if base_url.startswith("//"):
@@ -112,6 +144,7 @@ async def _fetch_7tv_asset_via_meta(session: aiohttp.ClientSession, emote_id: st
         [f for f in files if isinstance(f, dict) and f.get("name")],
         key=file_key,
     )
+    saw_oversized = False
 
     for f in candidates:
         fmt = str(f.get("format", "")).upper()
@@ -119,7 +152,10 @@ async def _fetch_7tv_asset_via_meta(session: aiohttp.ClientSession, emote_id: st
         size = int(f.get("size", 0))
         if fmt not in ("GIF", "PNG", "WEBP"):
             continue
-        if size <= 0 or size > 256 * 1024:
+        if size <= 0:
+            continue
+        if size > DISCORD_EMOJI_SIZE_LIMIT:
+            saw_oversized = True
             continue
         url = f"{base_url}/{name}"
         try:
@@ -129,42 +165,50 @@ async def _fetch_7tv_asset_via_meta(session: aiohttp.ClientSession, emote_id: st
                 data_bytes = await resp.read()
         except aiohttp.ClientError:
             continue
-        if len(data_bytes) > 256 * 1024:
+        if len(data_bytes) > DISCORD_EMOJI_SIZE_LIMIT:
+            saw_oversized = True
             continue
-        return data_bytes, (fmt == "GIF"), fmt.lower()
+        return AssetResult(data_bytes, (fmt == "GIF"), fmt.lower())
 
-    return None, None, None
+    reason = "too_large" if saw_oversized else "unavailable"
+    return AssetResult(None, None, None, reason=reason)
 
 
-async def _fetch_7tv_bytes(session: aiohttp.ClientSession, emote_id: str) -> Tuple[Optional[bytes], Optional[bool], Optional[str]]:
+async def _fetch_7tv_bytes(
+    session: aiohttp.ClientSession,
+    emote_id: str,
+    v3_data: Optional[Dict[str, Any]] = None,
+) -> AssetResult:
     """Try to download a suitable emote asset from the 7TV CDN within Discord's limits.
 
-    Returns (bytes, is_animated, ext) on success; otherwise (None, None, None).
+    Returns an AssetResult describing success or the failure reason.
     Tries meta-informed URLs first, then generic path fallback.
     Preference order: GIF 4x->1x, then PNG 4x->1x, then WEBP 4x->1x (as last resort).
     """
     # Use meta-informed selection first
-    data, is_anim, ext = await _fetch_7tv_asset_via_meta(session, emote_id)
-    if data:
-        return data, is_anim, ext
+    result = await _fetch_7tv_asset_via_meta(session, emote_id, v3_data=v3_data)
+    if result.data:
+        return result
 
-    exts = ["gif", "png", "webp"]
-    sizes = ["4x", "3x", "2x", "1x"]
-    for ext in exts:
-        for size in sizes:
-            url = f"https://cdn.7tv.app/emote/{emote_id}/{size}.{ext}"
+    saw_oversized = result.reason == "too_large"
+    for ext in ASSET_EXTENSIONS:
+        for size in ASSET_SIZES:
+            url = SEVENTV_CDN_URL.format(emote_id=emote_id, asset_name=f"{size}.{ext}")
             try:
                 async with session.get(url, headers=HEADERS) as resp:
                     if resp.status != 200:
                         continue
                     data = await resp.read()
                     # Discord custom emoji limit is 256 KiB
-                    if len(data) > 256 * 1024:
+                    if len(data) > DISCORD_EMOJI_SIZE_LIMIT:
+                        saw_oversized = True
                         continue
-                    return data, (ext == "gif"), ext
+                    return AssetResult(data, (ext == "gif"), ext)
             except aiohttp.ClientError:
                 continue
-    return None, None, None
+
+    reason = "too_large" if saw_oversized else "unavailable"
+    return AssetResult(None, None, None, reason=reason)
 
 
 def _extract_7tv_id(url: str) -> Optional[str]:
@@ -180,6 +224,77 @@ class SevenTV(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.session = None
+
+    def cog_unload(self):
+        if self.session is not None and not getattr(self.session, "closed", False):
+            self.bot.loop.create_task(self.session.close())
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self.session is None or getattr(self.session, "closed", False):
+            self.session = aiohttp.ClientSession()
+        return self.session
+
+    def _resolve_emoji_name(self, guild: discord.Guild, requested_name: Optional[str], api_name: Optional[str]) -> str:
+        base_name = _sanitize_name(requested_name) or _sanitize_name(api_name) or "seventv_emoji"
+        existing_names = {emoji.name for emoji in guild.emojis}
+        if base_name not in existing_names:
+            return base_name
+
+        for index in range(2, 100):
+            suffix = f"_{index}"
+            candidate = f"{base_name[: 32 - len(suffix)]}{suffix}"
+            if candidate not in existing_names:
+                return candidate
+        return base_name[:29] + "_99"
+
+    async def _normalize_asset(
+        self,
+        result: AssetResult,
+        api_animated: Optional[bool],
+    ) -> Tuple[Optional[bytes], Optional[bool], Optional[str], Optional[str]]:
+        if not result.data:
+            if result.reason == "too_large":
+                return None, None, None, FETCH_FAIL_TOO_LARGE
+            return None, None, None, FETCH_FAIL
+
+        data = result.data
+        is_animated = result.is_animated
+        ext = result.ext
+        animated_hint = bool(is_animated if is_animated is not None else api_animated)
+
+        if ext == "webp":
+            if animated_hint:
+                converted = await self._webp_to_gif_under_limit(data)
+                if not converted:
+                    return None, None, None, FETCH_FAIL_WEBP
+                return converted, True, "gif", None
+
+            converted = await self._webp_to_png_under_limit(data)
+            if not converted:
+                return None, None, None, FETCH_FAIL_WEBP
+            return converted, False, "png", None
+
+        return data, animated_hint if ext == "gif" else bool(is_animated), ext, None
+
+    async def _send_info(self, ctx: commands.Context, emote_id: str):
+        session = await self._get_session()
+        v3_data = await _fetch_7tv_v3_emote(session, emote_id)
+        name, animated = await _fetch_7tv_meta(session, emote_id, v3_data=v3_data)
+        result = await _fetch_7tv_bytes(session, emote_id, v3_data=v3_data)
+
+        if name is None and animated is None and not result.data and result.reason == "unavailable":
+            await ctx.send(INFO_FAIL)
+            return
+
+        asset_summary = f"{result.ext.upper()} asset within limit" if result.ext else result.reason or "unknown"
+        message = (
+            f"7TV emote info for `{emote_id}`\n"
+            f"Name: `{_sanitize_name(name) or name or 'unknown'}`\n"
+            f"Animated: `{animated if animated is not None else 'unknown'}`\n"
+            f"Best asset: `{asset_summary}`"
+        )
+        await ctx.send(message)
 
     @commands.guild_only()
     @commands.bot_has_permissions(manage_emojis=True)
@@ -195,40 +310,20 @@ class SevenTV(commands.Cog):
         if not emote_id:
             return await ctx.send(INVALID_LINK)
 
-        await ctx.typing()
+        async with ctx.typing():
+            session = await self._get_session()
+            v3_data = await _fetch_7tv_v3_emote(session, emote_id)
+            api_name, api_animated = await _fetch_7tv_meta(session, emote_id, v3_data=v3_data)
+            result = await _fetch_7tv_bytes(session, emote_id, v3_data=v3_data)
+            data, is_animated, ext, error_message = await self._normalize_asset(result, api_animated)
+            if error_message:
+                return await ctx.send(error_message)
 
-        async with aiohttp.ClientSession() as session:
-            # Determine default name and animation hint from API if possible
-            api_name, api_animated = await _fetch_7tv_meta(session, emote_id)
-
-            # Choose asset from CDN under 256 KiB
-            data, is_animated, ext = await _fetch_7tv_bytes(session, emote_id)
-            if not data:
-                return await ctx.send(FETCH_FAIL)
-
-            # If we only found WEBP, try converting to a suitable format
-            if ext == "webp":
-                # Prefer GIF for animated, PNG for static
-                if is_animated:
-                    converted = await self._webp_to_gif_under_limit(data)
-                    if converted:
-                        data = converted
-                        ext = "gif"
-                        is_animated = True
-                else:
-                    converted = await self._webp_to_png_under_limit(data)
-                    if converted:
-                        data = converted
-                        ext = "png"
-                        is_animated = False
-
-            # Check slot availability by type (animated if gif)
             animated_flag = bool(is_animated or (ext == "gif"))
             if _available_emoji_slots(ctx.guild, animated_flag) <= 0:
                 return await ctx.send(EMOJI_SLOTS)
 
-            # Finalize name
-            final_name = _sanitize_name(name) or _sanitize_name(api_name) or "seventv_emoji"
+            final_name = self._resolve_emoji_name(ctx.guild, name, api_name)
 
             try:
                 added = await ctx.guild.create_custom_emoji(name=final_name, image=data)
@@ -242,6 +337,17 @@ class SevenTV(commands.Cog):
             pass
 
         return await ctx.send(f"Uploaded: {str(added)} `{added.name}`")
+
+    @commands.guild_only()
+    @commands.command(name="7tvinfo")
+    async def seven_tv_info(self, ctx: commands.Context, link: str):
+        """Show 7TV emote details without uploading it."""
+        emote_id = _extract_7tv_id(link)
+        if not emote_id:
+            return await ctx.send(INVALID_LINK)
+
+        async with ctx.typing():
+            await self._send_info(ctx, emote_id)
 
     async def _webp_to_gif_under_limit(self, webp_bytes: bytes, limit: int = 256 * 1024) -> Optional[bytes]:
         """Convert animated WEBP bytes to a GIF under the size limit if possible."""
