@@ -35,7 +35,12 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         async def cog_disabled_in_guild(cog, guild):
             return False
 
-        self.bot = types.SimpleNamespace(cog_disabled_in_guild=cog_disabled_in_guild)
+        self.guilds = {}
+
+        def get_guild(guild_id):
+            return self.guilds.get(guild_id)
+
+        self.bot = types.SimpleNamespace(cog_disabled_in_guild=cog_disabled_in_guild, get_guild=get_guild)
         self.cog = modlog_module.ModLog(self.bot)
 
     async def test_modlog_here_sets_channel_and_enables_logging(self):
@@ -76,6 +81,7 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
             get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
             audit_logs=lambda **kwargs: AsyncIterator([entry]),
         )
+        self.guilds[guild.id] = guild
         await self.cog.config.guild(guild).enabled.set(True)
         await self.cog.config.guild(guild).channel_id.set(123)
 
@@ -100,6 +106,7 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
             get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
             audit_logs=lambda **kwargs: AsyncIterator([]),
         )
+        self.guilds[guild.id] = guild
         member = types.SimpleNamespace(id=20, name="User", guild=guild)
         await self.cog.config.guild(guild).enabled.set(True)
         await self.cog.config.guild(guild).channel_id.set(456)
@@ -127,6 +134,7 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
             get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
             audit_logs=lambda **kwargs: AsyncIterator([entry]),
         )
+        self.guilds[guild.id] = guild
         before = types.SimpleNamespace(id=44, guild=guild, timed_out_until=None)
         after = types.SimpleNamespace(
             id=44,
@@ -159,6 +167,7 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
             get_channel=lambda channel_id: None,
             audit_logs=lambda **kwargs: AsyncIterator([stale_entry]),
         )
+        self.guilds[guild.id] = guild
         await self.cog.config.guild(guild).enabled.set(True)
         await self.cog.config.guild(guild).channel_id.set(999)
 
@@ -176,14 +185,18 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
             id=6,
             get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
         )
+        self.guilds[guild.id] = guild
         channel = types.SimpleNamespace(id=321, name="mods", mention="#mods")
         author = types.SimpleNamespace(id=90, name="User", bot=False)
         message = types.SimpleNamespace(
+            id=555,
             guild=guild,
             channel=channel,
             author=author,
             content="deleted content",
             attachments=[object(), object()],
+            embeds=[],
+            stickers=[],
             jump_url="https://discord.test/jump",
         )
         await self.cog.config.guild(guild).enabled.set(True)
@@ -199,6 +212,44 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.fields[1].value, "deleted content")
         self.assertEqual(embed.fields[2].name, "Attachments")
         self.assertEqual(embed.fields[2].value, "2")
+        self.assertEqual(embed.footer, "Message ID: 555")
+
+    async def test_on_message_delete_logs_embed_only_messages(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=66,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
+        )
+        self.guilds[guild.id] = guild
+        channel = types.SimpleNamespace(id=322, name="mods", mention="#mods")
+        author = types.SimpleNamespace(id=92, name="User", bot=False)
+        message = types.SimpleNamespace(
+            id=556,
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="",
+            attachments=[],
+            embeds=[object()],
+            stickers=[],
+            jump_url=None,
+        )
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(322)
+
+        await self.cog.on_message_delete(message)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Message Deleted")
+        self.assertEqual(embed.fields[1].name, "Content")
+        self.assertEqual(embed.fields[1].value, "None")
+        self.assertEqual(embed.fields[2].name, "Embeds")
+        self.assertEqual(embed.fields[2].value, "1")
 
     async def test_on_message_edit_logs_before_and_after(self):
         sent_embeds = []
@@ -210,6 +261,7 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
             id=7,
             get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
         )
+        self.guilds[guild.id] = guild
         channel = types.SimpleNamespace(id=654, name="mods", mention="#mods")
         author = types.SimpleNamespace(id=91, name="User", bot=False)
         before = types.SimpleNamespace(
@@ -237,6 +289,168 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.fields[1].value, "old content")
         self.assertEqual(embed.fields[2].name, "After")
         self.assertEqual(embed.fields[2].value, "new content")
+
+    async def test_on_raw_message_delete_uses_cached_snapshot_when_message_was_seen(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=71,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, mention="#mods", send=send),
+        )
+        self.guilds[guild.id] = guild
+        channel = types.SimpleNamespace(id=777, name="mods", mention="#mods")
+        author = types.SimpleNamespace(id=93, name="User", display_name="User", bot=False)
+        message = types.SimpleNamespace(
+            id=9001,
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="snapshot content",
+            attachments=[object()],
+            embeds=[],
+            stickers=[],
+            jump_url="https://discord.test/jump3",
+        )
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(777)
+
+        await self.cog.on_message(message)
+        payload = types.SimpleNamespace(
+            guild_id=71,
+            channel_id=777,
+            message_id=9001,
+            cached_message=None,
+        )
+
+        await self.cog.on_raw_message_delete(payload)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.fields[0].value, "User (93)")
+        self.assertEqual(embed.fields[1].value, "snapshot content")
+        self.assertEqual(embed.fields[2].name, "Attachments")
+        self.assertEqual(embed.fields[2].value, "1")
+        self.assertEqual(embed.fields[3].name, "Jump")
+        self.assertEqual(embed.fields[3].value, "https://discord.test/jump3")
+        self.assertEqual(embed.footer, "Message ID: 9001")
+
+    async def test_on_message_edit_updates_snapshot_used_by_raw_delete(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=72,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, mention="#mods", send=send),
+        )
+        self.guilds[guild.id] = guild
+        channel = types.SimpleNamespace(id=778, name="mods", mention="#mods")
+        author = types.SimpleNamespace(id=94, name="User", display_name="User", bot=False)
+        before_seen = types.SimpleNamespace(
+            id=9002,
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="first version",
+            attachments=[],
+            embeds=[],
+            stickers=[],
+            jump_url=None,
+        )
+        before_edit = types.SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="first version",
+        )
+        after_edit = types.SimpleNamespace(
+            id=9002,
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="second version",
+            attachments=[],
+            embeds=[],
+            stickers=[],
+            jump_url=None,
+        )
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(778)
+
+        await self.cog.on_message(before_seen)
+        await self.cog.on_message_edit(before_edit, after_edit)
+        sent_embeds.clear()
+        payload = types.SimpleNamespace(
+            guild_id=72,
+            channel_id=778,
+            message_id=9002,
+            cached_message=None,
+        )
+
+        await self.cog.on_raw_message_delete(payload)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.fields[1].value, "second version")
+
+    async def test_on_raw_message_delete_logs_uncached_message_deletes(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=8,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, mention="#mods", send=send),
+        )
+        self.guilds[guild.id] = guild
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(777)
+
+        payload = types.SimpleNamespace(
+            guild_id=8,
+            channel_id=777,
+            message_id=123456,
+            cached_message=None,
+        )
+
+        await self.cog.on_raw_message_delete(payload)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Message Deleted")
+        self.assertEqual(embed.fields[0].value, "Unknown")
+        self.assertEqual(embed.fields[1].value, modlog_module.UNKNOWN_MESSAGE_CONTENT)
+        self.assertEqual(embed.footer, "Message ID: 123456")
+
+    async def test_on_raw_message_delete_skips_cached_messages_to_avoid_duplicates(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=9,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, mention="#mods", send=send),
+        )
+        self.guilds[guild.id] = guild
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(888)
+
+        payload = types.SimpleNamespace(
+            guild_id=9,
+            channel_id=888,
+            message_id=654321,
+            cached_message=object(),
+        )
+
+        await self.cog.on_raw_message_delete(payload)
+
+        self.assertEqual(sent_embeds, [])
 
 
 if __name__ == "__main__":

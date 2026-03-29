@@ -1,4 +1,6 @@
+from collections import OrderedDict
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Optional
 
 import discord
@@ -6,6 +8,8 @@ from redbot.core import Config, commands
 
 
 DEFAULT_AUDIT_WINDOW_SECONDS = 15
+MAX_CACHED_MESSAGE_SNAPSHOTS = 5000
+UNKNOWN_MESSAGE_CONTENT = "Unavailable (message was not cached at deletion time)"
 
 
 class ModLog(commands.Cog):
@@ -14,6 +18,7 @@ class ModLog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=742904511, force_registration=True)
+        self._message_cache = OrderedDict()
         self.config.register_guild(
             enabled=False,
             channel_id=None,
@@ -50,6 +55,60 @@ class ModLog(commands.Cog):
         if len(compact) <= limit:
             return compact
         return compact[: limit - 3] + "..."
+
+    def _message_has_visible_state(self, message) -> bool:
+        return any(
+            [
+                bool(getattr(message, "content", None)),
+                bool(getattr(message, "attachments", None)),
+                bool(getattr(message, "embeds", None)),
+                bool(getattr(message, "stickers", None)),
+            ]
+        )
+
+    def _snapshot_count_list(self, items) -> list:
+        count = len(items or [])
+        return [None] * count
+
+    def _store_message_snapshot(self, message):
+        message_id = getattr(message, "id", None)
+        guild = getattr(message, "guild", None)
+        channel = getattr(message, "channel", None)
+        author = getattr(message, "author", None)
+        if message_id is None or guild is None or channel is None:
+            return
+        if getattr(author, "bot", False):
+            return
+        if not self._message_has_visible_state(message):
+            return
+
+        snapshot = SimpleNamespace(
+            id=message_id,
+            guild=guild,
+            channel=SimpleNamespace(
+                id=getattr(channel, "id", None),
+                mention=getattr(channel, "mention", None) or f"<#{getattr(channel, 'id', 'unknown')}>",
+                name=getattr(channel, "name", "unknown"),
+            ),
+            author=SimpleNamespace(
+                id=getattr(author, "id", None),
+                name=getattr(author, "name", None),
+                display_name=getattr(author, "display_name", None),
+            ),
+            content=getattr(message, "content", None),
+            attachments=self._snapshot_count_list(getattr(message, "attachments", None)),
+            embeds=self._snapshot_count_list(getattr(message, "embeds", None)),
+            stickers=self._snapshot_count_list(getattr(message, "stickers", None)),
+            jump_url=getattr(message, "jump_url", None),
+        )
+
+        self._message_cache.pop(message_id, None)
+        self._message_cache[message_id] = snapshot
+        while len(self._message_cache) > MAX_CACHED_MESSAGE_SNAPSHOTS:
+            self._message_cache.popitem(last=False)
+
+    def _pop_message_snapshot(self, message_id: int):
+        return self._message_cache.pop(message_id, None)
 
     async def _is_disabled_in_guild(self, guild) -> bool:
         result = self.bot.cog_disabled_in_guild(self, guild)
@@ -149,9 +208,19 @@ class ModLog(commands.Cog):
         channel = getattr(message, "channel", None)
         author = getattr(message, "author", None)
         attachments = getattr(message, "attachments", []) or []
+        embeds = getattr(message, "embeds", []) or []
+        stickers = getattr(message, "stickers", []) or []
 
         embed = self._base_embed(title, color=color)
-        embed.description = f"Channel: {getattr(channel, 'mention', '#' + getattr(channel, 'name', 'unknown'))}"
+        channel_label = getattr(channel, "mention", None)
+        if not channel_label:
+            channel_id = getattr(channel, "id", None)
+            if channel_id is not None:
+                channel_label = f"<#{channel_id}>"
+            else:
+                channel_label = "#" + getattr(channel, "name", "unknown")
+
+        embed.description = f"Channel: {channel_label}"
         embed.add_field(name="Author", value=self._entity_label(author))
 
         if before is not None:
@@ -163,10 +232,43 @@ class ModLog(commands.Cog):
 
         if attachments:
             embed.add_field(name="Attachments", value=str(len(attachments)))
+        if embeds:
+            embed.add_field(name="Embeds", value=str(len(embeds)))
+        if stickers:
+            embed.add_field(name="Stickers", value=str(len(stickers)))
 
         jump_url = getattr(message, "jump_url", None)
         if jump_url:
             embed.add_field(name="Jump", value=jump_url)
+
+        message_id = getattr(message, "id", None)
+        if message_id is not None:
+            embed.set_footer(text=f"Message ID: {message_id}")
+
+        await self._send_embed(guild, embed)
+
+    async def _send_raw_delete_event(self, guild, channel_id: int, message_id: int):
+        if await self._is_disabled_in_guild(guild):
+            return
+
+        snapshot = self._pop_message_snapshot(message_id)
+        if snapshot is not None:
+            await self._send_message_event(
+                guild,
+                title="Message Deleted",
+                color=0x6C757D,
+                message=snapshot,
+            )
+            return
+
+        channel = getattr(guild, "get_channel", lambda _channel_id: None)(channel_id)
+        channel_label = getattr(channel, "mention", None) or f"<#{channel_id}>"
+
+        embed = self._base_embed("Message Deleted", color=0x6C757D)
+        embed.description = f"Channel: {channel_label}"
+        embed.add_field(name="Author", value="Unknown")
+        embed.add_field(name="Content", value=UNKNOWN_MESSAGE_CONTENT)
+        embed.set_footer(text=f"Message ID: {message_id}")
 
         await self._send_embed(guild, embed)
 
@@ -244,16 +346,26 @@ class ModLog(commands.Cog):
         )
 
     @commands.Cog.listener()
+    async def on_message(self, message):
+        if getattr(message, "guild", None) is None:
+            return
+        self._store_message_snapshot(message)
+
+    @commands.Cog.listener()
     async def on_message_delete(self, message):
         guild = getattr(message, "guild", None)
         if guild is None:
             return
 
+        message_id = getattr(message, "id", None)
+        if message_id is not None:
+            self._pop_message_snapshot(message_id)
+
         author = getattr(message, "author", None)
         if getattr(author, "bot", False):
             return
 
-        if not getattr(message, "content", None) and not getattr(message, "attachments", None):
+        if not self._message_has_visible_state(message):
             return
 
         await self._send_message_event(
@@ -264,6 +376,23 @@ class ModLog(commands.Cog):
         )
 
     @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload):
+        if getattr(payload, "cached_message", None) is not None:
+            return
+
+        guild_id = getattr(payload, "guild_id", None)
+        channel_id = getattr(payload, "channel_id", None)
+        message_id = getattr(payload, "message_id", None)
+        if guild_id is None or channel_id is None or message_id is None:
+            return
+
+        guild = getattr(self.bot, "get_guild", lambda _guild_id: None)(guild_id)
+        if guild is None:
+            return
+
+        await self._send_raw_delete_event(guild, channel_id, message_id)
+
+    @commands.Cog.listener()
     async def on_message_edit(self, before, after):
         guild = getattr(after, "guild", None)
         if guild is None:
@@ -272,6 +401,8 @@ class ModLog(commands.Cog):
         author = getattr(after, "author", None)
         if getattr(author, "bot", False):
             return
+
+        self._store_message_snapshot(after)
 
         before_content = getattr(before, "content", None) or ""
         after_content = getattr(after, "content", None) or ""
