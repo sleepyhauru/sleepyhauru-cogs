@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import ipaddress
+import math
 import socket
 from io import BytesIO
 from random import randint
@@ -14,6 +15,7 @@ from redbot.core import Config, checks, commands
 
 
 MAX_SIZE = 8 * 1000 * 1000
+MAX_SOURCE_SIZE = 32 * 1000 * 1000
 MAX_DIMENSION = 3840
 MAX_PIXELS = 12_000_000
 MAX_FRAMES = 200
@@ -185,6 +187,194 @@ class Deepfry(commands.Cog):
                 "An image could not be downloaded. Make sure you provide a direct link."
             )
 
+    @staticmethod
+    def _source_filesize_limit(output_limit: int) -> int:
+        return max(output_limit, MAX_SOURCE_SIZE)
+
+    @staticmethod
+    def _constrained_dimensions(width: int, height: int) -> Tuple[int, int]:
+        scale = 1.0
+        largest_side = max(width, height)
+        if largest_side > MAX_DIMENSION:
+            scale = min(scale, MAX_DIMENSION / largest_side)
+
+        pixels = width * height
+        if pixels > MAX_PIXELS:
+            scale = min(scale, math.sqrt(MAX_PIXELS / pixels))
+
+        if scale >= 1.0:
+            return width, height
+
+        new_width = max(1, int(width * scale))
+        new_height = max(1, int(height * scale))
+        while max(new_width, new_height) > MAX_DIMENSION or (new_width * new_height) > MAX_PIXELS:
+            if new_width >= new_height and new_width > 1:
+                new_width -= 1
+            elif new_height > 1:
+                new_height -= 1
+            else:
+                break
+        return new_width, new_height
+
+    @classmethod
+    def _resize_within_limits(cls, img: Image.Image) -> Image.Image:
+        width, height = img.size
+        new_size = cls._constrained_dimensions(width, height)
+        if new_size == (width, height):
+            return img
+        return img.resize(new_size, RESAMPLE_BILINEAR)
+
+    @staticmethod
+    def _buffer_size(temp: BytesIO) -> int:
+        return temp.getbuffer().nbytes
+
+    @classmethod
+    def _encode_static_result(cls, img: Image.Image, filename: str, filesize_limit: int) -> BytesIO:
+        img = cls._resize_within_limits(img.convert("RGB"))
+        width, height = img.size
+        best = None
+        best_size = None
+        scales = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
+        qualities = [95, 85, 75, 60, 45, 30, 20, 10, 5]
+
+        for scale in scales:
+            if scale == 1.0:
+                candidate = img
+            else:
+                candidate = img.resize(
+                    (
+                        max(1, int(width * scale)),
+                        max(1, int(height * scale)),
+                    ),
+                    RESAMPLE_BILINEAR,
+                )
+
+            for quality in qualities:
+                temp = BytesIO()
+                temp.name = filename
+                try:
+                    candidate.save(temp, format="JPEG", quality=quality, optimize=True)
+                except OSError:
+                    temp = BytesIO()
+                    temp.name = filename
+                    candidate.save(temp, format="JPEG", quality=quality)
+
+                size = cls._buffer_size(temp)
+                if best is None or size < best_size:
+                    temp.seek(0)
+                    best = temp
+                    best_size = size
+
+                if size <= filesize_limit:
+                    temp.seek(0)
+                    return temp
+
+        if best is not None:
+            best.seek(0)
+            return best
+
+        temp = BytesIO()
+        temp.name = filename
+        img.save(temp, format="JPEG", quality=5)
+        temp.seek(0)
+        return temp
+
+    @staticmethod
+    def _stepped_duration(duration, step: int):
+        if duration is None:
+            return None
+        if isinstance(duration, int):
+            return duration * step
+        if isinstance(duration, (list, tuple)):
+            stepped = []
+            index = 0
+            while index < len(duration):
+                stepped.append(sum(duration[index:index + step]))
+                index += step
+            return stepped
+        return duration
+
+    @staticmethod
+    def _quantize_frame(frame: Image.Image, colors: int) -> Image.Image:
+        if colors >= 256:
+            return frame
+        quantize = getattr(frame, "quantize", None)
+        if callable(quantize):
+            try:
+                return quantize(colors=colors)
+            except TypeError:
+                return quantize(colors)
+            except Exception:
+                return frame
+        return frame
+
+    @classmethod
+    def _encode_animated_result(
+        cls,
+        frames: list[Image.Image],
+        filename: str,
+        filesize_limit: int,
+        duration,
+    ) -> BytesIO:
+        if not frames:
+            raise ImageFindError("Failed to process that animation.")
+
+        best = None
+        best_size = None
+        scales = [1.0, 0.85, 0.7, 0.55, 0.4, 0.3]
+        steps = [1, 2, 4]
+        colors_list = [256, 128, 64]
+
+        for step in steps:
+            stepped_frames = frames[::step]
+            stepped_duration = cls._stepped_duration(duration, step)
+
+            for scale in scales:
+                scaled_frames = []
+                for frame in stepped_frames:
+                    candidate = frame
+                    if scale != 1.0:
+                        width, height = candidate.size
+                        candidate = candidate.resize(
+                            (
+                                max(1, int(width * scale)),
+                                max(1, int(height * scale)),
+                            ),
+                            RESAMPLE_BILINEAR,
+                        )
+                    scaled_frames.append(candidate)
+
+                for colors in colors_list:
+                    encoded_frames = [cls._quantize_frame(frame, colors) for frame in scaled_frames]
+                    temp = BytesIO()
+                    temp.name = filename
+                    save_kwargs = {
+                        "format": "GIF",
+                        "save_all": True,
+                        "append_images": encoded_frames[1:],
+                        "loop": 0,
+                        "optimize": True,
+                    }
+                    if stepped_duration is not None:
+                        save_kwargs["duration"] = stepped_duration
+                    encoded_frames[0].save(temp, **save_kwargs)
+                    size = cls._buffer_size(temp)
+
+                    if best is None or size < best_size:
+                        temp.seek(0)
+                        best = temp
+                        best_size = size
+
+                    if size <= filesize_limit:
+                        temp.seek(0)
+                        return temp
+
+        if best is not None:
+            best.seek(0)
+            return best
+
+        raise ImageFindError("Failed to process that animation.")
+
     def _open_image_from_bytes(
         self, data: bytes
     ) -> Tuple[Image.Image, bool, Optional[int]]:
@@ -194,9 +384,6 @@ class Deepfry(commands.Cog):
             raise ImageFindError("The downloaded file was not a valid image.")
 
         width, height = img.size
-        if max(width, height) > MAX_DIMENSION or (width * height) > MAX_PIXELS:
-            raise ImageFindError("That image is too large.")
-
         is_animated = bool(
             getattr(img, "is_animated", False) or getattr(img, "n_frames", 1) > 1
         )
@@ -208,7 +395,7 @@ class Deepfry(commands.Cog):
             duration = img.info.get("duration")
         else:
             duration = None
-            img = img.convert("RGB")
+            img = self._resize_within_limits(img.convert("RGB"))
 
         return img, is_animated, duration
 
@@ -268,10 +455,11 @@ class Deepfry(commands.Cog):
         """Helper function to find and validate an image."""
         if ctx.guild:
             allow_all_types = await self.config.guild(ctx.guild).allowAllTypes()
-            filesize_limit = ctx.guild.filesize_limit
+            output_limit = ctx.guild.filesize_limit
         else:
             allow_all_types = False
-            filesize_limit = MAX_SIZE
+            output_limit = MAX_SIZE
+        source_limit = self._source_filesize_limit(output_limit)
 
         source_type, source_value, source_note = await self._resolve_target(ctx, link, allow_all_types)
         await self._debug(ctx, f"Selected source: {source_note or source_type}")
@@ -294,7 +482,7 @@ class Deepfry(commands.Cog):
 
         if source_type == "attachment":
             attachment = source_value
-            data = await self._read_attachment_bytes(attachment, filesize_limit)
+            data = await self._read_attachment_bytes(attachment, source_limit)
             img, isgif, duration = self._open_image_from_bytes(data)
             await self._debug(ctx, f"Attachment resolved: animated={isgif}, size={img.size}")
             return img, isgif, duration
@@ -304,15 +492,15 @@ class Deepfry(commands.Cog):
             path = urlparse(url).path
             if not self._valid_path_type(path, allow_all_types):
                 await self._debug(ctx, "URL path had no trusted extension; attempting content sniff anyway.")
-            data = await self._read_url_bytes(url, filesize_limit)
+            data = await self._read_url_bytes(url, source_limit)
             img, isgif, duration = self._open_image_from_bytes(data)
             await self._debug(ctx, f"URL resolved: animated={isgif}, size={img.size}")
             return img, isgif, duration
 
         raise ImageFindError("Failed to resolve an image source.")
 
-    @staticmethod
-    def _fry(img):
+    @classmethod
+    def _fry(cls, img, filesize_limit):
         e = ImageEnhance.Sharpness(img)
         img = e.enhance(100)
         e = ImageEnhance.Contrast(img)
@@ -329,20 +517,16 @@ class Deepfry(commands.Cog):
         img = Image.merge("RGB", (r, g, b))
         e = ImageEnhance.Brightness(img)
         img = e.enhance(1.5)
-        temp = BytesIO()
-        temp.name = "deepfried.png"
-        img.save(temp)
-        temp.seek(0)
-        return temp
+        return cls._encode_static_result(img, "deepfried.jpg", filesize_limit)
 
-    @staticmethod
-    def _videofry(img, duration):
+    @classmethod
+    def _videofry(cls, img, duration, filesize_limit):
         imgs = []
         frame = 0
         while img:
             if frame >= MAX_FRAMES:
                 break
-            i = img.copy().convert("RGB")
+            i = cls._resize_within_limits(img.copy().convert("RGB"))
             e = ImageEnhance.Sharpness(i)
             i = e.enhance(100)
             e = ImageEnhance.Contrast(i)
@@ -366,17 +550,10 @@ class Deepfry(commands.Cog):
             except EOFError:
                 break
 
-        temp = BytesIO()
-        temp.name = "deepfried.gif"
-        save_kwargs = {"format": "GIF", "save_all": True, "append_images": imgs[1:], "loop": 0}
-        if duration is not None:
-            save_kwargs["duration"] = duration
-        imgs[0].save(temp, **save_kwargs)
-        temp.seek(0)
-        return temp
+        return cls._encode_animated_result(imgs, "deepfried.gif", filesize_limit, duration)
 
-    @staticmethod
-    def _nuke(img):
+    @classmethod
+    def _nuke(cls, img, filesize_limit):
         w, h = img.size
         dx = ((w + 200) // 200) * 2
         dy = ((h + 200) // 200) * 2
@@ -400,20 +577,16 @@ class Deepfry(commands.Cog):
         e = ImageEnhance.Sharpness(img)
         img = e.enhance(100)
         img = img.resize((w, h), RESAMPLE_BILINEAR)
-        temp = BytesIO()
-        temp.name = "nuke.jpg"
-        img.save(temp, quality=1)
-        temp.seek(0)
-        return temp
+        return cls._encode_static_result(img, "nuke.jpg", filesize_limit)
 
-    @staticmethod
-    def _videonuke(img, duration):
+    @classmethod
+    def _videonuke(cls, img, duration, filesize_limit):
         imgs = []
         frame = 0
         while img:
             if frame >= MAX_FRAMES:
                 break
-            i = img.copy().convert("RGB")
+            i = cls._resize_within_limits(img.copy().convert("RGB"))
             w, h = i.size
             dx = ((w + 200) // 200) * 2
             dy = ((h + 200) // 200) * 2
@@ -444,14 +617,7 @@ class Deepfry(commands.Cog):
             except EOFError:
                 break
 
-        temp = BytesIO()
-        temp.name = "nuke.gif"
-        save_kwargs = {"format": "GIF", "save_all": True, "append_images": imgs[1:], "loop": 0}
-        if duration is not None:
-            save_kwargs["duration"] = duration
-        imgs[0].save(temp, **save_kwargs)
-        temp.seek(0)
-        return temp
+        return cls._encode_animated_result(imgs, "nuke.gif", filesize_limit, duration)
 
     @commands.command(aliases=["df"])
     @commands.bot_has_permissions(attach_files=True)
@@ -468,9 +634,14 @@ class Deepfry(commands.Cog):
                 return await ctx.send(str(e))
 
             if isgif:
-                task = functools.partial(self._videofry, img, duration)
+                task = functools.partial(
+                    self._videofry,
+                    img,
+                    duration,
+                    ctx.guild.filesize_limit if ctx.guild else MAX_SIZE,
+                )
             else:
-                task = functools.partial(self._fry, img)
+                task = functools.partial(self._fry, img, ctx.guild.filesize_limit if ctx.guild else MAX_SIZE)
 
             task = self.bot.loop.run_in_executor(None, task)
             try:
@@ -498,9 +669,14 @@ class Deepfry(commands.Cog):
                 return await ctx.send(str(e))
 
             if isgif:
-                task = functools.partial(self._videonuke, img, duration)
+                task = functools.partial(
+                    self._videonuke,
+                    img,
+                    duration,
+                    ctx.guild.filesize_limit if ctx.guild else MAX_SIZE,
+                )
             else:
-                task = functools.partial(self._nuke, img)
+                task = functools.partial(self._nuke, img, ctx.guild.filesize_limit if ctx.guild else MAX_SIZE)
 
             task = self.bot.loop.run_in_executor(None, task)
             try:
@@ -655,11 +831,14 @@ class Deepfry(commands.Cog):
         attachment = self._get_valid_attachment(msg, allow_all_types)
         if attachment is None:
             return
-        if attachment.size > msg.guild.filesize_limit:
+        if attachment.size > self._source_filesize_limit(msg.guild.filesize_limit):
             return
 
         try:
-            data = await self._read_attachment_bytes(attachment, msg.guild.filesize_limit)
+            data = await self._read_attachment_bytes(
+                attachment,
+                self._source_filesize_limit(msg.guild.filesize_limit),
+            )
             img, isgif, duration = self._open_image_from_bytes(data)
         except ImageFindError:
             return
@@ -669,9 +848,9 @@ class Deepfry(commands.Cog):
 
         if vnuke != 0 and randint(1, vnuke) == 1:
             if isgif:
-                task = functools.partial(self._videonuke, img, duration)
+                task = functools.partial(self._videonuke, img, duration, msg.guild.filesize_limit)
             else:
-                task = functools.partial(self._nuke, img)
+                task = functools.partial(self._nuke, img, msg.guild.filesize_limit)
             task = self.bot.loop.run_in_executor(None, task)
             try:
                 image = await asyncio.wait_for(task, timeout=60)
@@ -682,9 +861,9 @@ class Deepfry(commands.Cog):
 
         if vfry != 0 and randint(1, vfry) == 1:
             if isgif:
-                task = functools.partial(self._videofry, img, duration)
+                task = functools.partial(self._videofry, img, duration, msg.guild.filesize_limit)
             else:
-                task = functools.partial(self._fry, img)
+                task = functools.partial(self._fry, img, msg.guild.filesize_limit)
             task = self.bot.loop.run_in_executor(None, task)
             try:
                 image = await asyncio.wait_for(task, timeout=60)
