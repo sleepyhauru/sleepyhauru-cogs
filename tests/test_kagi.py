@@ -38,6 +38,18 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             "styled output",
         )
 
+    def test_contains_only_custom_emojis_detects_discord_markup(self):
+        self.assertTrue(
+            self.cog._contains_only_custom_emojis("<a:PU_PepeInteresting:531807279280816129>")
+        )
+        self.assertTrue(
+            self.cog._contains_only_custom_emojis(
+                "<:wave:123456789012345678> <a:dance:987654321098765432>"
+            )
+        )
+        self.assertFalse(self.cog._contains_only_custom_emojis("hello <:wave:123456789012345678>"))
+        self.assertFalse(self.cog._contains_only_custom_emojis("😭"))
+
     async def test_get_auth_trims_values(self):
         await self.cog.config.kagi_session.set("  a  ")
         await self.cog.config.translate_session.set("  b  ")
@@ -197,6 +209,39 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             [("😭\n\nrng prompt", "gen_z")],
         )
         self.assertEqual(sent[0][0], "😭")
+        self.assertEqual(sent[0][1]["allowed_mentions"], "none")
+
+    async def test_run_style_command_bypasses_translate_for_custom_emoji_only_text(self):
+        sent = []
+        translate_calls = []
+
+        async def send(message, **kwargs):
+            sent.append((message, kwargs))
+
+        async def fake_translate(text, to_lang):
+            translate_calls.append((text, to_lang))
+            return "should not be used"
+
+        async def fake_get_auth():
+            return "kagi-cookie", "translate-cookie"
+
+        self.cog._translate = fake_translate
+        self.cog._get_auth = fake_get_auth
+
+        ctx = types.SimpleNamespace(
+            send=send,
+            author=types.SimpleNamespace(id=42),
+            message=types.SimpleNamespace(reference=None),
+        )
+
+        await self.cog._run_style_command(
+            ctx=ctx,
+            text="<a:PU_PepeInteresting:531807279280816129>",
+            mode_key="genz",
+        )
+
+        self.assertEqual(translate_calls, [])
+        self.assertEqual(sent[0][0], "<a:PU_PepeInteresting:531807279280816129>")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
 
     async def test_send_output_chunks_long_messages(self):

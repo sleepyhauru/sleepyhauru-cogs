@@ -1,5 +1,6 @@
 import json
 import random
+import re
 from typing import Optional
 
 import aiohttp
@@ -15,6 +16,7 @@ class Kagi(commands.Cog):
 
     API_URL = "https://translate.kagi.com/api/translate"
     MAX_MESSAGE_LENGTH = 2000
+    CUSTOM_EMOJI_RE = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:\d{17,20}>")
     STYLE_CONFIGS = {
         "linkedin": {
             "target_lang": "linkedin",
@@ -90,6 +92,14 @@ class Kagi(commands.Cog):
 
     def _build_styled_input(self, text: str, prompt: str) -> str:
         return f"{text}\n\n{prompt}"
+
+    @classmethod
+    def _contains_only_custom_emojis(cls, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return False
+        remainder = cls.CUSTOM_EMOJI_RE.sub("", stripped)
+        return not remainder.strip()
 
     @staticmethod
     def _strip_echoed_prompt(output: str, prompt: str) -> str:
@@ -258,6 +268,10 @@ class Kagi(commands.Cog):
 
         if len(target) > 4000:
             await ctx.send("That message is too long to translate.")
+            return
+
+        if self._contains_only_custom_emojis(target):
+            await self._send_output(ctx, target)
             return
 
         prompt = self._choose_style_prompt(mode_key)
