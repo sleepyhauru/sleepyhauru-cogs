@@ -42,6 +42,10 @@ Lets anyone steal emojis and stickers sent by other people, and lets moderators 
 
 Adds Kagi Translate tools, including LinkedIn and Gen Z style transformations with random personality modes.
 
+### ▶ ModLog (`modlog`)
+
+Tracks core moderator actions like bans, unbans, kicks, timeout changes, and cached message edits/deletes, then posts them in a configured mod-log channel.
+
 ### ▶ No Fuck You (`nofuckyou`)
 
 Replies with `No fuck you` when someone says `fuck you`, with configurable response odds, a per-channel cooldown, and tracked stats. It starts disabled until enabled with `[p]nofuckyou enable`.

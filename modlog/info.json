@@ -1,0 +1,12 @@
+{
+    "author": ["sleepyhauru"],
+    "min_bot_version": "3.5.0",
+    "description": "Logs moderator actions like bans, unbans, kicks, and timeout changes to a configured mod-log channel.",
+    "hidden": false,
+    "install_msg": "Load it with `[p]load modlog`. Set the current channel as your mod log with `[p]modlog here`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Logs core moderator actions to a mod-log channel.",
+    "end_user_data_statement": "This cog stores per-guild configuration settings for the mod-log channel. It does not store user data.",
+    "tags": ["moderation", "logging", "audit", "modlog"]
+}
