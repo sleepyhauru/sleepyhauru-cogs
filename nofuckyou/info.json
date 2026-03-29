@@ -1,0 +1,12 @@
+{
+    "author": ["sleepyhauru", "Eris"],
+    "min_bot_version": "3.5.0",
+    "description": "Replies with \"No fuck you\" when someone says \"fuck you\", with configurable odds.",
+    "hidden": false,
+    "install_msg": "Load it with `[p]load nofuckyou`. It starts disabled; enable it with `[p]nofuckyou enable`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Replies to \"fuck you\" with configurable odds.",
+    "end_user_data_statement": "This cog stores per-guild configuration settings. It does not store user data.",
+    "tags": ["fun", "auto-response", "listener", "moderation"]
+}
