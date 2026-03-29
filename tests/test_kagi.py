@@ -38,17 +38,18 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             "styled output",
         )
 
-    def test_contains_only_custom_emojis_detects_discord_markup(self):
-        self.assertTrue(
-            self.cog._contains_only_custom_emojis("<a:PU_PepeInteresting:531807279280816129>")
+    def test_normalize_custom_emoji_text_extracts_names(self):
+        self.assertEqual(
+            self.cog._normalize_custom_emoji_text("<a:PU_PepeInteresting:531807279280816129>"),
+            ":PU_PepeInteresting:",
         )
-        self.assertTrue(
-            self.cog._contains_only_custom_emojis(
-                "<:wave:123456789012345678> <a:dance:987654321098765432>"
-            )
+        self.assertEqual(
+            self.cog._normalize_custom_emoji_text(
+                "hello <:wave:123456789012345678> <a:dance_party:987654321098765432>"
+            ),
+            "hello :wave: :dance_party:",
         )
-        self.assertFalse(self.cog._contains_only_custom_emojis("hello <:wave:123456789012345678>"))
-        self.assertFalse(self.cog._contains_only_custom_emojis("😭"))
+        self.assertEqual(self.cog._normalize_custom_emoji_text("😭"), "😭")
 
     async def test_get_auth_trims_values(self):
         await self.cog.config.kagi_session.set("  a  ")
@@ -211,7 +212,7 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0][0], "😭")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
 
-    async def test_run_style_command_bypasses_translate_for_custom_emoji_only_text(self):
+    async def test_run_style_command_normalizes_custom_emoji_before_translate(self):
         sent = []
         translate_calls = []
 
@@ -220,7 +221,7 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         async def fake_translate(text, to_lang):
             translate_calls.append((text, to_lang))
-            return "should not be used"
+            return "extra af pepe interesting"
 
         async def fake_get_auth():
             return "kagi-cookie", "translate-cookie"
@@ -230,18 +231,23 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         ctx = types.SimpleNamespace(
             send=send,
+            typing=lambda: self._typing_context(),
             author=types.SimpleNamespace(id=42),
             message=types.SimpleNamespace(reference=None),
         )
 
-        await self.cog._run_style_command(
-            ctx=ctx,
-            text="<a:PU_PepeInteresting:531807279280816129>",
-            mode_key="genz",
-        )
+        with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
+            await self.cog._run_style_command(
+                ctx=ctx,
+                text="<a:PU_PepeInteresting:531807279280816129>",
+                mode_key="genz",
+            )
 
-        self.assertEqual(translate_calls, [])
-        self.assertEqual(sent[0][0], "<a:PU_PepeInteresting:531807279280816129>")
+        self.assertEqual(
+            translate_calls,
+            [(":PU_PepeInteresting:\n\nrng prompt", "gen_z")],
+        )
+        self.assertEqual(sent[0][0], "extra af pepe interesting")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
 
     async def test_send_output_chunks_long_messages(self):
@@ -353,6 +359,17 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             return value
 
         return inner
+
+    @staticmethod
+    def _typing_context():
+        class TypingContext:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        return TypingContext()
 
 
 if __name__ == "__main__":

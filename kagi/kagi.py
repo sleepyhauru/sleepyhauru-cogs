@@ -16,7 +16,7 @@ class Kagi(commands.Cog):
 
     API_URL = "https://translate.kagi.com/api/translate"
     MAX_MESSAGE_LENGTH = 2000
-    CUSTOM_EMOJI_RE = re.compile(r"<a?:[A-Za-z0-9_]{2,32}:\d{17,20}>")
+    CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]{2,32}):\d{17,20}>")
     STYLE_CONFIGS = {
         "linkedin": {
             "target_lang": "linkedin",
@@ -94,12 +94,12 @@ class Kagi(commands.Cog):
         return f"{text}\n\n{prompt}"
 
     @classmethod
-    def _contains_only_custom_emojis(cls, text: str) -> bool:
-        stripped = text.strip()
-        if not stripped:
-            return False
-        remainder = cls.CUSTOM_EMOJI_RE.sub("", stripped)
-        return not remainder.strip()
+    def _normalize_custom_emoji_text(cls, text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1).strip()
+            return f":{name}:" if name else match.group(0)
+
+        return cls.CUSTOM_EMOJI_RE.sub(replace, text)
 
     @staticmethod
     def _strip_echoed_prompt(output: str, prompt: str) -> str:
@@ -266,12 +266,10 @@ class Kagi(commands.Cog):
             await ctx.send(config["missing_text_message"])
             return
 
+        target = self._normalize_custom_emoji_text(target)
+
         if len(target) > 4000:
             await ctx.send("That message is too long to translate.")
-            return
-
-        if self._contains_only_custom_emojis(target):
-            await self._send_output(ctx, target)
             return
 
         prompt = self._choose_style_prompt(mode_key)
