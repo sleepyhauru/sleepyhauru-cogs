@@ -11,7 +11,7 @@ class Kagi(commands.Cog):
     """Kagi Translate integrations for LinkedIn and Gen Z styles."""
 
     __author__ = "sleepyhauru"
-    __version__ = "2.1.0"
+    __version__ = "2.1.1"
 
     API_URL = "https://translate.kagi.com/api/translate"
     MAX_MESSAGE_LENGTH = 2000
@@ -84,10 +84,24 @@ class Kagi(commands.Cog):
         except Exception:
             return text
 
-    def _build_styled_input(self, text: str, mode_key: str) -> str:
+    def _choose_style_prompt(self, mode_key: str) -> str:
         config = self.STYLE_CONFIGS[mode_key]
-        prompt = random.choice(config["rng_prompts"])
+        return random.choice(config["rng_prompts"])
+
+    def _build_styled_input(self, text: str, prompt: str) -> str:
         return f"{text}\n\n{prompt}"
+
+    @staticmethod
+    def _strip_echoed_prompt(output: str, prompt: str) -> str:
+        stripped = output.rstrip()
+        if not stripped.endswith(prompt):
+            return output
+
+        raw_prefix = stripped[: -len(prompt)]
+        if raw_prefix and raw_prefix[-1].isspace():
+            return raw_prefix.rstrip()
+
+        return output
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or getattr(self.session, "closed", False):
@@ -246,7 +260,8 @@ class Kagi(commands.Cog):
             await ctx.send("That message is too long to translate.")
             return
 
-        styled_input = self._build_styled_input(target, mode_key)
+        prompt = self._choose_style_prompt(mode_key)
+        styled_input = self._build_styled_input(target, prompt)
         async with ctx.typing():
             try:
                 output = await self._translate(styled_input, config["target_lang"])
@@ -254,6 +269,7 @@ class Kagi(commands.Cog):
                 await ctx.send(f"Error: {e}")
                 return
 
+        output = self._strip_echoed_prompt(output, prompt)
         await self._send_output(ctx, output)
 
     async def _send_owner_dm(self, ctx: commands.Context, message: str):

@@ -18,10 +18,25 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog._fix_mojibake("already fine"), "already fine")
 
     def test_build_styled_input_uses_mode_prompt(self):
-        with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
-            result = self.cog._build_styled_input("hello", "linkedin")
+        result = self.cog._build_styled_input("hello", "rng prompt")
 
         self.assertEqual(result, "hello\n\nrng prompt")
+
+    def test_choose_style_prompt_uses_mode_prompt(self):
+        with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
+            result = self.cog._choose_style_prompt("linkedin")
+
+        self.assertEqual(result, "rng prompt")
+
+    def test_strip_echoed_prompt_removes_trailing_internal_prompt(self):
+        self.assertEqual(
+            self.cog._strip_echoed_prompt("😭\n\nrng prompt", "rng prompt"),
+            "😭",
+        )
+        self.assertEqual(
+            self.cog._strip_echoed_prompt("styled output", "rng prompt"),
+            "styled output",
+        )
 
     async def test_get_auth_trims_values(self):
         await self.cog.config.kagi_session.set("  a  ")
@@ -142,6 +157,46 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             [("hello there\n\nrng prompt", "linkedin")],
         )
         self.assertEqual(sent[0][0], "styled output")
+        self.assertEqual(sent[0][1]["allowed_mentions"], "none")
+
+    async def test_run_style_command_strips_echoed_prompt_from_emoji_output(self):
+        sent = []
+        translate_calls = []
+
+        async def send(message, **kwargs):
+            sent.append((message, kwargs))
+
+        class TypingContext:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def fake_translate(text, to_lang):
+            translate_calls.append((text, to_lang))
+            return "😭\n\nrng prompt"
+
+        async def fake_get_auth():
+            return "kagi-cookie", "translate-cookie"
+
+        self.cog._translate = fake_translate
+        self.cog._get_auth = fake_get_auth
+
+        ctx = types.SimpleNamespace(
+            send=send,
+            typing=lambda: TypingContext(),
+            author=types.SimpleNamespace(id=42),
+        )
+
+        with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
+            await self.cog._run_style_command(ctx=ctx, text="😭", mode_key="genz")
+
+        self.assertEqual(
+            translate_calls,
+            [("😭\n\nrng prompt", "gen_z")],
+        )
+        self.assertEqual(sent[0][0], "😭")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
 
     async def test_send_output_chunks_long_messages(self):
