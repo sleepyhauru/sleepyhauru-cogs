@@ -16,39 +16,41 @@ To add one of these cogs to your instance of Red, send the following commands on
 
 You may be prompted to respond with "I agree" after the second command.
 
-# Utility cogs
+# Included cogs
 
-These may prove the most useful to most people.
+These are the installable cogs currently present in this repo.
 
-### ▶ AddImage
+### ▶ AddImage (`addimage`)
 
 Lets you save images for the bot to upload directly later, similar to aliases but for attachments. Supports guild-specific images and global bot images.
 
-### ▶ EmojiSteal
+### ▶ Commands (`commands`)
+
+Provides a single embedded command list showing categorized commands for selected installed cogs.
+
+### ▶ Deepfry (`deepfry`)
+
+Applies filters to images to deepfry or nuke them. Supports attached images, linked images, the most recent image, and profile pictures.
+
+### ▶ EmojiSteal (`emojisteal`)
 
 Lets anyone steal emojis and stickers sent by other people, and lets moderators upload them to the current server instantly. Supports context menus. Specially useful if you're on mobile as the Discord app doesn't let you copy emoji links or upload stickers, but this cog has commands for those. Animated stickers are annoying but there's a workaround.
 
 ![demonstration](https://i.imgur.com/zdizXGp.png)
 
-### ▶ Commands
-
-Provides a single embedded command list showing categorized commands for selected installed cogs.
-
-### ▶ SevenTV
-
-Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`. Converts WEBP emotes to GIF or PNG when needed so they can be uploaded to Discord.
-
-# Other cogs
-
-### ▶ Deepfry
-
-Applies filters to images to deepfry or nuke them. Supports attached images, linked images, the most recent image, and profile pictures.
-
-### ▶ Kagi
+### ▶ Kagi (`kagi`)
 
 Adds Kagi Translate tools, including LinkedIn and Gen Z style transformations with random personality modes.
 
-### ▶ VoiceLog
+### ▶ No Fuck You (`nofuckyou`)
+
+Replies with `No fuck you` when someone says `fuck you`, with configurable response odds, a per-channel cooldown, and tracked stats. It starts disabled until enabled with `[p]nofuckyou enable`.
+
+### ▶ SevenTV (`seventv`)
+
+Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`. Converts WEBP emotes to GIF or PNG when needed so they can be uploaded to Discord.
+
+### ▶ VoiceLog (`voicelog`)
 
 Logs users joining and leaving voicechat, inside the text chat embedded in the voicechat channel itself. Finally gives a use to those things.
 
