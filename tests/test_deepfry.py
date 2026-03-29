@@ -57,6 +57,33 @@ class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
             "https://example.com/image.png",
         )
 
+    async def test_assert_safe_remote_url_rejects_private_ip_literal(self):
+        with self.assertRaises(deepfry_module.ImageFindError) as cm:
+            await self.cog._assert_safe_remote_url("http://127.0.0.1/image.png")
+
+        self.assertEqual(str(cm.exception), "That image URL is not allowed.")
+
+    async def test_assert_safe_remote_url_rejects_hostnames_resolving_to_private_ips(self):
+        async def fake_resolve(hostname, port):
+            self.assertEqual((hostname, port), ("example.com", 443))
+            return {"10.0.0.5"}
+
+        self.cog._resolve_hostname_addresses = fake_resolve
+
+        with self.assertRaises(deepfry_module.ImageFindError) as cm:
+            await self.cog._assert_safe_remote_url("https://example.com/image.png")
+
+        self.assertEqual(str(cm.exception), "That image URL is not allowed.")
+
+    async def test_assert_safe_remote_url_allows_public_hosts(self):
+        async def fake_resolve(hostname, port):
+            self.assertEqual((hostname, port), ("example.com", 443))
+            return {"93.184.216.34"}
+
+        self.cog._resolve_hostname_addresses = fake_resolve
+
+        await self.cog._assert_safe_remote_url("https://example.com/image.png")
+
     async def test_resolve_target_uses_reply_attachment_before_history(self):
         class ReplyOnlyValue:
             async def __call__(self):

@@ -1,5 +1,7 @@
 import asyncio
 import functools
+import ipaddress
+import socket
 from io import BytesIO
 from random import randint
 from typing import Optional, Tuple, Union
@@ -101,10 +103,67 @@ class Deepfry(commands.Cog):
 
         return None
 
+    @staticmethod
+    def _is_private_network_address(value: str) -> bool:
+        ip = ipaddress.ip_address(value)
+        return any(
+            [
+                ip.is_private,
+                ip.is_loopback,
+                ip.is_link_local,
+                ip.is_multicast,
+                ip.is_reserved,
+                ip.is_unspecified,
+            ]
+        )
+
+    async def _resolve_hostname_addresses(self, hostname: str, port: int) -> set[str]:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(
+            hostname,
+            port,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+        return {info[4][0] for info in infos if info and len(info) >= 5 and info[4]}
+
+    async def _assert_safe_remote_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ImageFindError("Only http and https image URLs are allowed.")
+        if parsed.username or parsed.password:
+            raise ImageFindError("That image URL is not allowed.")
+
+        hostname = parsed.hostname
+        if not hostname:
+            raise ImageFindError("That image URL is invalid.")
+        if hostname.lower() == "localhost":
+            raise ImageFindError("That image URL is not allowed.")
+
+        try:
+            if self._is_private_network_address(hostname):
+                raise ImageFindError("That image URL is not allowed.")
+            return
+        except ValueError:
+            pass
+
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            addresses = await self._resolve_hostname_addresses(hostname, port)
+        except OSError:
+            raise ImageFindError("That image URL could not be resolved.")
+
+        if not addresses:
+            raise ImageFindError("That image URL could not be resolved.")
+        if any(self._is_private_network_address(address) for address in addresses):
+            raise ImageFindError("That image URL is not allowed.")
+
     async def _read_url_bytes(self, url: str, filesize_limit: int) -> bytes:
         if not self.session or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=30)
             self.session = aiohttp.ClientSession(timeout=timeout)
+
+        await self._assert_safe_remote_url(url)
 
         try:
             async with self.session.get(url) as response:

@@ -151,6 +151,26 @@ class AddImage(commands.Cog):
 
         return None
 
+    def _safe_storage_extension(self, filename: str) -> str:
+        ext_aliases = {
+            ".jpe": ".jpg",
+        }
+        suffix = Path(filename).suffix.lower()
+        suffix = ext_aliases.get(suffix, suffix)
+        if suffix and suffix[1:].isalnum() and len(suffix) <= 10:
+            return suffix
+
+        guessed_type, _ = mimetypes.guess_type(filename)
+        if not guessed_type or not guessed_type.startswith("image/"):
+            return ""
+
+        guessed_ext = (mimetypes.guess_extension(guessed_type) or "").lower()
+        guessed_ext = ext_aliases.get(guessed_ext, guessed_ext)
+        if guessed_ext and guessed_ext[1:].isalnum() and len(guessed_ext) <= 10:
+            return guessed_ext
+
+        return ""
+
     async def local_perms(self, message: discord.Message) -> bool:
         """Check the user is/isn't locally whitelisted/blacklisted.
         https://github.com/Cog-Creators/Red-DiscordBot/blob/V3/release/3.0.0/redbot/core/global_checks.py
@@ -546,7 +566,8 @@ class AddImage(commands.Cog):
         self, msg: discord.Message, name: str, guild: Optional[discord.Guild] = None
     ) -> None:
         seed = "".join(random.sample(string.ascii_uppercase + string.digits, k=5))
-        filename = "{}-{}".format(seed, msg.attachments[0].filename)
+        suffix = self._safe_storage_extension(msg.attachments[0].filename)
+        filename = f"{seed}{suffix}"
         if guild is not None:
             directory = await self.get_directory(guild)
             cur_images = await self.config.guild(guild).images()

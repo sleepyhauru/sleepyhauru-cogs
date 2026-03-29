@@ -67,6 +67,11 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(await self.cog.validate_attachment(ok))
 
+    def test_safe_storage_extension_normalizes_filename_suffixes(self):
+        self.assertEqual(self.cog._safe_storage_extension("image.png"), ".png")
+        self.assertEqual(self.cog._safe_storage_extension("../../weird/../photo.jpeg"), ".jpeg")
+        self.assertEqual(self.cog._safe_storage_extension("avatar.jpe"), ".jpg")
+
     async def test_wait_for_image_returns_exit_message_and_notifies_user(self):
         sent = []
 
@@ -257,6 +262,28 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         await self.cog.add_image_guild(ctx, "sample")
 
         self.assertEqual(sent, ["bad file"])
+
+    async def test_save_image_location_ignores_original_attachment_filename(self):
+        saved_paths = []
+
+        async def fake_save(path):
+            saved_paths.append(Path(path))
+
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(id=5),
+            attachments=[types.SimpleNamespace(filename="../../escape.png", save=fake_save)],
+        )
+
+        await self.cog.save_image_location(message, "sample", self.guild)
+
+        images = await self.cog.config.guild(self.guild).images()
+        self.assertEqual(len(images), 1)
+        stored_name = images[0]["file_loc"]
+        self.assertNotIn("/", stored_name)
+        self.assertNotIn("\\", stored_name)
+        self.assertNotIn("..", stored_name)
+        self.assertTrue(stored_name.endswith(".png"))
+        self.assertEqual(saved_paths[0], self.data_dir / stored_name)
 
 
 if __name__ == "__main__":
