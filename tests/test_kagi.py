@@ -17,12 +17,12 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog._fix_mojibake("cafÃ©"), "café")
         self.assertEqual(self.cog._fix_mojibake("already fine"), "already fine")
 
-    def test_build_styled_input_uses_mode_prompt(self):
-        result = self.cog._build_styled_input("hello", "rng prompt")
+    def test_build_style_context_uses_mode_prompt(self):
+        result = self.cog._build_style_context("rng prompt")
 
         self.assertEqual(
             result,
-            "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\nhello",
+            "rng prompt\nReturn only the rewritten text.",
         )
 
     def test_choose_style_prompt_uses_mode_prompt(self):
@@ -42,7 +42,7 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.cog._strip_echoed_prompt(
-                "styled output\nInstruction: rng prompt\nReturn only the rewritten text.\nmore text",
+                "styled output\nInstructions: rng prompt\nReturn only the rewritten text.\nmore text",
                 "rng prompt",
             ),
             "styled output\nmore text",
@@ -169,8 +169,8 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
-        async def fake_translate(text, to_lang):
-            translate_calls.append((text, to_lang))
+        async def fake_translate(text, to_lang, context=""):
+            translate_calls.append((text, to_lang, context))
             return "styled output"
 
         async def fake_get_auth():
@@ -192,8 +192,9 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             translate_calls,
             [
                 (
-                    "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\nhello there",
+                    "hello there",
                     "linkedin",
+                    "rng prompt\nReturn only the rewritten text.",
                 )
             ],
         )
@@ -214,8 +215,8 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
-        async def fake_translate(text, to_lang):
-            translate_calls.append((text, to_lang))
+        async def fake_translate(text, to_lang, context=""):
+            translate_calls.append((text, to_lang, context))
             return "😭\n\nrng prompt"
 
         async def fake_get_auth():
@@ -237,8 +238,9 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             translate_calls,
             [
                 (
-                    "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\n😭",
+                    "😭",
                     "gen_z",
+                    "rng prompt\nReturn only the rewritten text.",
                 )
             ],
         )
@@ -252,8 +254,8 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         async def send(message, **kwargs):
             sent.append((message, kwargs))
 
-        async def fake_translate(text, to_lang):
-            translate_calls.append((text, to_lang))
+        async def fake_translate(text, to_lang, context=""):
+            translate_calls.append((text, to_lang, context))
             return "extra af pepe interesting"
 
         async def fake_get_auth():
@@ -280,8 +282,9 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             translate_calls,
             [
                 (
-                    "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\n:PU_PepeInteresting:",
+                    ":PU_PepeInteresting:",
                     "gen_z",
+                    "rng prompt\nReturn only the rewritten text.",
                 )
             ],
         )
@@ -330,7 +333,7 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         await self.cog._run_style_command(ctx, None, "linkedin")
         self.assertEqual(sent[-1], self.cog.STYLE_CONFIGS["linkedin"]["missing_text_message"])
 
-        async def fake_translate(text, to_lang):
+        async def fake_translate(text, to_lang, context=""):
             raise RuntimeError("boom")
 
         self.cog._translate = fake_translate
@@ -350,7 +353,7 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         ctx = types.SimpleNamespace(send=send, author=types.SimpleNamespace(send=author_send))
 
-        async def fake_translate(text, to_lang):
+        async def fake_translate(text, to_lang, context=""):
             return "line1\nline2"
 
         self.cog._translate = fake_translate

@@ -17,7 +17,6 @@ class Kagi(commands.Cog):
     API_URL = "https://translate.kagi.com/api/translate"
     MAX_MESSAGE_LENGTH = 2000
     STYLE_RETURN_DIRECTIVE = "Return only the rewritten text."
-    STYLE_TEXT_LABEL = "Text:"
     CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]{2,32}):\d{17,20}>")
     URL_ONLY_RE = re.compile(r"^(?:https?://\S+\s*)+$", re.IGNORECASE)
     STYLE_CONFIGS = {
@@ -93,13 +92,8 @@ class Kagi(commands.Cog):
         config = self.STYLE_CONFIGS[mode_key]
         return random.choice(config["rng_prompts"])
 
-    def _build_styled_input(self, text: str, prompt: str) -> str:
-        return (
-            f"Instruction: {prompt}\n"
-            f"{self.STYLE_RETURN_DIRECTIVE}\n\n"
-            f"{self.STYLE_TEXT_LABEL}\n"
-            f"{text}"
-        )
+    def _build_style_context(self, prompt: str) -> str:
+        return f"{prompt}\n{self.STYLE_RETURN_DIRECTIVE}"
 
     @classmethod
     def _normalize_custom_emoji_text(cls, text: str) -> str:
@@ -120,9 +114,10 @@ class Kagi(commands.Cog):
         # Kagi occasionally echoes the instruction verbatim as its own paragraph.
         echoed_blocks = (
             f"Instruction: {prompt}",
+            f"Instructions: {prompt}",
             prompt,
             Kagi.STYLE_RETURN_DIRECTIVE,
-            Kagi.STYLE_TEXT_LABEL,
+            "Text:",
         )
         for block in echoed_blocks:
             block_patterns = (
@@ -141,6 +136,7 @@ class Kagi(commands.Cog):
 
         trailing_blocks = (
             f"Instruction: {prompt}",
+            f"Instructions: {prompt}",
             prompt,
             Kagi.STYLE_RETURN_DIRECTIVE,
         )
@@ -164,7 +160,14 @@ class Kagi(commands.Cog):
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
-    def _build_payload(self, text: str, to_lang: str, model: str, translate_session: str) -> dict:
+    def _build_payload(
+        self,
+        text: str,
+        to_lang: str,
+        model: str,
+        translate_session: str,
+        context: str = "",
+    ) -> dict:
         return {
             "text": text,
             "from": "en_us",
@@ -175,7 +178,7 @@ class Kagi(commands.Cog):
             "addressee_gender": "unknown",
             "language_complexity": "standard",
             "translation_style": "natural",
-            "context": "",
+            "context": context,
             "model": model,
             "session_token": translate_session,
             "dictionary_language": "en",
@@ -210,7 +213,7 @@ class Kagi(commands.Cog):
 
         return final_text
 
-    async def _translate(self, text: str, to_lang: str) -> str:
+    async def _translate(self, text: str, to_lang: str, context: str = "") -> str:
         kagi_session, translate_session = await self._get_auth()
         model = await self.config.model()
 
@@ -227,7 +230,7 @@ class Kagi(commands.Cog):
             "kagi_session": kagi_session,
             "translate_session": translate_session,
         }
-        payload = self._build_payload(text, to_lang, model, translate_session)
+        payload = self._build_payload(text, to_lang, model, translate_session, context=context)
         session = await self._get_session()
 
         async with session.post(self.API_URL, headers=headers, cookies=cookies, json=payload) as resp:
@@ -318,10 +321,10 @@ class Kagi(commands.Cog):
             return
 
         prompt = self._choose_style_prompt(mode_key)
-        styled_input = self._build_styled_input(target, prompt)
+        style_context = self._build_style_context(prompt)
         async with ctx.typing():
             try:
-                output = await self._translate(styled_input, config["target_lang"])
+                output = await self._translate(target, config["target_lang"], context=style_context)
             except Exception as e:
                 await ctx.send(f"Error: {e}")
                 return
