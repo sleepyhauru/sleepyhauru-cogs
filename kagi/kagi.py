@@ -16,7 +16,10 @@ class Kagi(commands.Cog):
 
     API_URL = "https://translate.kagi.com/api/translate"
     MAX_MESSAGE_LENGTH = 2000
+    STYLE_RETURN_DIRECTIVE = "Return only the rewritten text."
+    STYLE_TEXT_LABEL = "Text:"
     CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]{2,32}):\d{17,20}>")
+    URL_ONLY_RE = re.compile(r"^(?:https?://\S+\s*)+$", re.IGNORECASE)
     STYLE_CONFIGS = {
         "linkedin": {
             "target_lang": "linkedin",
@@ -91,7 +94,12 @@ class Kagi(commands.Cog):
         return random.choice(config["rng_prompts"])
 
     def _build_styled_input(self, text: str, prompt: str) -> str:
-        return f"{text}\n\n{prompt}"
+        return (
+            f"Instruction: {prompt}\n"
+            f"{self.STYLE_RETURN_DIRECTIVE}\n\n"
+            f"{self.STYLE_TEXT_LABEL}\n"
+            f"{text}"
+        )
 
     @classmethod
     def _normalize_custom_emoji_text(cls, text: str) -> str:
@@ -101,17 +109,54 @@ class Kagi(commands.Cog):
 
         return cls.CUSTOM_EMOJI_RE.sub(replace, text)
 
+    @classmethod
+    def _is_url_only_text(cls, text: str) -> bool:
+        return bool(text and cls.URL_ONLY_RE.fullmatch(text.strip()))
+
     @staticmethod
     def _strip_echoed_prompt(output: str, prompt: str) -> str:
-        stripped = output.rstrip()
-        if not stripped.endswith(prompt):
-            return output
+        cleaned = output.strip()
 
-        raw_prefix = stripped[: -len(prompt)]
-        if raw_prefix and raw_prefix[-1].isspace():
-            return raw_prefix.rstrip()
+        # Kagi occasionally echoes the instruction verbatim as its own paragraph.
+        echoed_blocks = (
+            f"Instruction: {prompt}",
+            prompt,
+            Kagi.STYLE_RETURN_DIRECTIVE,
+            Kagi.STYLE_TEXT_LABEL,
+        )
+        for block in echoed_blocks:
+            block_patterns = (
+                f"\n\n{block}",
+                f"{block}\n\n",
+                f"\n{block}\n",
+            )
+            for pattern in block_patterns:
+                while pattern in cleaned:
+                    cleaned = cleaned.replace(pattern, "\n").strip()
+            if cleaned == block:
+                cleaned = ""
 
-        return output
+        if cleaned in echoed_blocks:
+            cleaned = ""
+
+        trailing_blocks = (
+            f"Instruction: {prompt}",
+            prompt,
+            Kagi.STYLE_RETURN_DIRECTIVE,
+        )
+        for block in trailing_blocks:
+            if cleaned.endswith(block):
+                raw_prefix = cleaned[: -len(block)].rstrip()
+                if not raw_prefix or cleaned[len(raw_prefix) :].strip() == block:
+                    cleaned = raw_prefix
+
+        if cleaned:
+            return cleaned
+
+        if output.strip() in echoed_blocks:
+            return ""
+
+        return output.strip()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or getattr(self.session, "closed", False):
@@ -202,14 +247,10 @@ class Kagi(commands.Cog):
             return await self._collect_stream_text(resp)
 
     def _extract_message_text(self, message: discord.Message) -> Optional[str]:
-        if message.content and message.content.strip():
-            return message.content.strip()
-
-        if not message.embeds:
-            return None
+        content = message.content.strip() if message.content and message.content.strip() else None
 
         embed_text_parts = []
-        for embed in message.embeds:
+        for embed in message.embeds or []:
             if embed.title:
                 embed_text_parts.append(embed.title)
             if embed.description:
@@ -220,8 +261,12 @@ class Kagi(commands.Cog):
                 if field.value:
                     embed_text_parts.append(field.value)
 
-        combined = "\n".join(part for part in embed_text_parts if part and part.strip()).strip()
-        return combined or None
+        embed_text = "\n".join(part for part in embed_text_parts if part and part.strip()).strip() or None
+
+        if embed_text and (content is None or self._is_url_only_text(content)):
+            return embed_text
+
+        return content or embed_text
 
     async def _send_output(self, ctx: commands.Context, output: str):
         for start in range(0, len(output), self.MAX_MESSAGE_LENGTH):

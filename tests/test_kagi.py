@@ -20,7 +20,10 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
     def test_build_styled_input_uses_mode_prompt(self):
         result = self.cog._build_styled_input("hello", "rng prompt")
 
-        self.assertEqual(result, "hello\n\nrng prompt")
+        self.assertEqual(
+            result,
+            "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\nhello",
+        )
 
     def test_choose_style_prompt_uses_mode_prompt(self):
         with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
@@ -37,6 +40,17 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             self.cog._strip_echoed_prompt("styled output", "rng prompt"),
             "styled output",
         )
+        self.assertEqual(
+            self.cog._strip_echoed_prompt(
+                "styled output\nInstruction: rng prompt\nReturn only the rewritten text.\nmore text",
+                "rng prompt",
+            ),
+            "styled output\nmore text",
+        )
+        self.assertEqual(
+            self.cog._strip_echoed_prompt("rng prompt", "rng prompt"),
+            "",
+        )
 
     def test_normalize_custom_emoji_text_extracts_names(self):
         self.assertEqual(
@@ -50,6 +64,15 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             "hello :wave: :dance_party:",
         )
         self.assertEqual(self.cog._normalize_custom_emoji_text("😭"), "😭")
+
+    def test_extract_message_text_prefers_embed_over_url_only_content(self):
+        embed = discord.Embed(description="tweet body here")
+        message = discord.Message(
+            content="https://x.com/example/status/1234567890",
+            embeds=[embed],
+        )
+
+        self.assertEqual(self.cog._extract_message_text(message), "tweet body here")
 
     async def test_get_auth_trims_values(self):
         await self.cog.config.kagi_session.set("  a  ")
@@ -167,7 +190,12 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             translate_calls,
-            [("hello there\n\nrng prompt", "linkedin")],
+            [
+                (
+                    "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\nhello there",
+                    "linkedin",
+                )
+            ],
         )
         self.assertEqual(sent[0][0], "styled output")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
@@ -207,7 +235,12 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             translate_calls,
-            [("😭\n\nrng prompt", "gen_z")],
+            [
+                (
+                    "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\n😭",
+                    "gen_z",
+                )
+            ],
         )
         self.assertEqual(sent[0][0], "😭")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
@@ -245,7 +278,12 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             translate_calls,
-            [(":PU_PepeInteresting:\n\nrng prompt", "gen_z")],
+            [
+                (
+                    "Instruction: rng prompt\nReturn only the rewritten text.\n\nText:\n:PU_PepeInteresting:",
+                    "gen_z",
+                )
+            ],
         )
         self.assertEqual(sent[0][0], "extra af pepe interesting")
         self.assertEqual(sent[0][1]["allowed_mentions"], "none")
