@@ -1,61 +1,60 @@
-# 
+# sleepyhauru-cogs
 
-This is an addon for [Red Discord Bot](https://github.com/Cog-Creators/Red-DiscordBot), with features that I developed for my own servers.
+This is an addon repo for [Red Discord Bot](https://github.com/Cog-Creators/Red-DiscordBot), built around the cogs I use on my own servers.
 
-These require Red 3.5, which uses the newer Discord interaction features.
+These cogs target Red 3.5-era installs and use modern Discord interaction features where it makes sense.
 
-### Installation
+## Installation
 
-To add one of these cogs to your instance of Red, send the following commands one by one (`[p]` is your prefix):
-```
+To add one of these cogs to your instance of Red, run the following commands one by one (`[p]` is your prefix):
+
+```text
 [p]load downloader
 [p]repo add sleepyhauru-cogs https://github.com/sleepyhauru/sleepyhauru-cogs
 [p]cog install sleepyhauru-cogs [cog name]
 [p]load [cog name]
 ```
 
-You may be prompted to respond with "I agree" after the second command.
+You may be prompted to respond with `I agree` during install.
 
-# Included cogs
+## Included Cogs
 
-These are the installable cogs currently present in this repo.
+### AddImage (`addimage`)
 
-### ▶ AddImage (`addimage`)
+Save images for the bot to upload later, similar to aliases but for attachments. Supports guild-specific images, owner-managed global images, renaming, deletion, and per-guild size limits.
 
-Lets you save images for the bot to upload directly later, similar to aliases but for attachments. Supports guild-specific images and global bot images.
+### Commands (`commands`)
 
-### ▶ Commands (`commands`)
+Provides a single embedded command browser for selected installed cogs. Includes owner configuration for allow/deny lists and auto-discovery behavior.
 
-Provides a single embedded command list showing categorized commands for selected installed cogs.
+### Deepfry (`deepfry`)
 
-### ▶ Deepfry (`deepfry`)
+Applies deepfry or nuke filters to static images and GIFs. Supports attachments, direct links, replies, recent channel history, embeds, and member avatars. Includes auto-fry/auto-nuke odds, reply-only mode, and debug output.
 
-Applies filters to images to deepfry or nuke them. Supports attached images, linked images, the most recent image, and profile pictures.
+### EmojiSteal (`emojisteal`)
 
-### ▶ EmojiSteal (`emojisteal`)
-
-Lets anyone steal emojis and stickers sent by other people, and lets moderators upload them to the current server instantly. Supports context menus. Specially useful if you're on mobile as the Discord app doesn't let you copy emoji links or upload stickers, but this cog has commands for those. Animated stickers are annoying but there's a workaround.
+Lets users steal emojis and stickers from replied-to messages, return their asset URLs, or upload them to the current server. Includes Discord context menus, `getemoji`, and mobile-friendly sticker upload flows.
 
 ![demonstration](https://i.imgur.com/zdizXGp.png)
 
-### ▶ Kagi (`kagi`)
+### Kagi (`kagi`)
 
-Adds Kagi Translate tools, including LinkedIn and Gen Z style transformations with random personality modes.
+Adds Kagi Translate tools, including `linkedin` and `genz` style rewrites plus owner-only setup and auth test commands. Custom Discord emoji are normalized before style rewrites so they can be passed to Kagi cleanly.
 
-### ▶ ModLog (`modlog`)
+### ModLog (`modlog`)
 
-Tracks core moderator actions like bans, unbans, kicks, timeout changes, and cached message edits/deletes, then posts them in a configured mod-log channel.
+Tracks moderator actions like bans, unbans, kicks, timeout changes, and cached message edits/deletes, then posts them in a configured mod-log channel.
 
-### ▶ No Fuck You (`nofuckyou`)
+### No Fuck You (`nofuckyou`)
 
-Replies with `No fuck you` when someone says `fuck you`, with configurable response odds, a per-channel cooldown, and tracked stats. It starts disabled until enabled with `[p]nofuckyou enable`.
+Replies with `No fuck you` when someone says `fuck you`, with configurable odds, cooldowns, thirsty mode, and tracked stats. It starts disabled until enabled with `[p]nofuckyou enable`.
 
-### ▶ SevenTV (`seventv`)
+### SevenTV (`seventv`)
 
-Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`. Converts WEBP emotes to GIF or PNG when needed so they can be uploaded to Discord.
+Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`, and inspects emotes with `[p]7tvinfo <link>`. Converts WEBP assets when needed so they can be uploaded to Discord.
 
-### ▶ VoiceLog (`voicelog`)
+### VoiceLog (`voicelog`)
 
-Logs users joining and leaving voicechat, inside the text chat embedded in the voicechat channel itself. Finally gives a use to those things.
+Logs users joining, leaving, and moving between voice channels inside the voice channel's text chat. Includes per-event toggles and a configurable cooldown.
 
 ![demonstration](https://i.imgur.com/U2Zitgc.png)
