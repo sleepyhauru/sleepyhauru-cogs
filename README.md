@@ -27,6 +27,8 @@ Save images for the bot to upload later, similar to aliases but for attachments.
 
 Provides a single embedded command browser for selected installed cogs. Includes owner configuration for allow/deny lists and auto-discovery behavior.
 
+![Commands example](docs/screenshots/commands.png)
+
 ### Deepfry (`deepfry`)
 
 Applies deepfry or nuke filters to static images and GIFs. Supports attachments, direct links, replies, recent channel history, embeds, and member avatars. Includes auto-fry/auto-nuke odds, reply-only mode, and debug output.
@@ -35,11 +37,13 @@ Applies deepfry or nuke filters to static images and GIFs. Supports attachments,
 
 Lets users steal emojis and stickers from replied-to messages, return their asset URLs, or upload them to the current server. Includes Discord context menus, `getemoji`, and mobile-friendly sticker upload flows.
 
-![demonstration](https://i.imgur.com/zdizXGp.png)
+![EmojiSteal example](docs/screenshots/emojisteal.png)
 
 ### Kagi (`kagi`)
 
 Adds Kagi Translate tools, including `linkedin` and `genz` style rewrites plus owner-only setup and auth test commands. Custom Discord emoji are normalized before style rewrites so they can be passed to Kagi cleanly.
+
+![Kagi example](docs/screenshots/kagi.png)
 
 ### ModLog (`modlog`)
 
@@ -49,6 +53,8 @@ Tracks moderator actions like bans, unbans, kicks, timeout changes, and cached m
 
 Replies with `No fuck you` when someone says `fuck you`, with configurable odds, cooldowns, thirsty mode, and tracked stats. It starts disabled until enabled with `[p]nofuckyou enable`.
 
+![No Fuck You example](docs/screenshots/nofuckyou.png)
+
 ### SevenTV (`seventv`)
 
 Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`, and inspects emotes with `[p]7tvinfo <link>`. Converts WEBP assets when needed so they can be uploaded to Discord.
@@ -57,4 +63,4 @@ Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`, and inspect
 
 Logs users joining, leaving, and moving between voice channels inside the voice channel's text chat. Includes per-event toggles and a configurable cooldown.
 
-![demonstration](https://i.imgur.com/U2Zitgc.png)
+![VoiceLog example](docs/screenshots/voicelog.png)
