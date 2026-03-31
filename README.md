@@ -45,7 +45,7 @@ Owner-only backup tools for server emojis and stickers. Export a guild's current
 
 ### Kagi (`kagi`)
 
-Adds Kagi Translate tools, including `linkedin` and `genz` style rewrites plus owner-only setup and auth test commands. Custom Discord emoji are normalized before style rewrites so they can be passed to Kagi cleanly.
+Adds Kagi Translate tools, including `translate` (auto-detect to English), `translateinto <language>`, and the `linkedin` / `genz` style rewrites, plus owner-only setup and auth test commands. Custom Discord emoji are normalized before translation so they can be passed to Kagi cleanly.
 
 ![Kagi example](docs/screenshots/kagi.png)
 

@@ -12,13 +12,50 @@ class Kagi(commands.Cog):
     """Kagi Translate integrations for LinkedIn and Gen Z styles."""
 
     __author__ = "sleepyhauru"
-    __version__ = "2.1.1"
+    __version__ = "2.2.0"
 
     API_URL = "https://translate.kagi.com/api/translate"
     MAX_MESSAGE_LENGTH = 2000
     STYLE_RETURN_DIRECTIVE = "Return only the rewritten text."
     CUSTOM_EMOJI_RE = re.compile(r"<a?:([A-Za-z0-9_]{2,32}):\d{17,20}>")
     URL_ONLY_RE = re.compile(r"^(?:https?://\S+\s*)+$", re.IGNORECASE)
+    LANGUAGE_ALIASES = {
+        "auto": "auto",
+        "detect": "auto",
+        "automatic": "auto",
+        "english": "en",
+        "eng": "en",
+        "en-us": "en",
+        "en_us": "en",
+        "spanish": "es",
+        "espanol": "es",
+        "español": "es",
+        "french": "fr",
+        "german": "de",
+        "italian": "it",
+        "portuguese": "pt",
+        "brazilian portuguese": "pt_br",
+        "brazilian-portuguese": "pt_br",
+        "portuguese (brazil)": "pt_br",
+        "japanese": "ja",
+        "korean": "ko",
+        "chinese": "zh",
+        "traditional chinese": "zh_tw",
+        "simplified chinese": "zh_cn",
+        "russian": "ru",
+        "ukrainian": "uk",
+        "polish": "pl",
+        "dutch": "nl",
+        "swedish": "sv",
+        "norwegian": "no",
+        "danish": "da",
+        "finnish": "fi",
+        "turkish": "tr",
+        "arabic": "ar",
+        "hindi": "hi",
+        "indonesian": "id",
+        "vietnamese": "vi",
+    }
     STYLE_CONFIGS = {
         "linkedin": {
             "target_lang": "linkedin",
@@ -163,6 +200,7 @@ class Kagi(commands.Cog):
     def _build_payload(
         self,
         text: str,
+        from_lang: str,
         to_lang: str,
         model: str,
         translate_session: str,
@@ -170,7 +208,7 @@ class Kagi(commands.Cog):
     ) -> dict:
         return {
             "text": text,
-            "from": "en_us",
+            "from": from_lang,
             "to": to_lang,
             "stream": True,
             "formality": "default",
@@ -185,6 +223,11 @@ class Kagi(commands.Cog):
             "use_definition_context": True,
             "enable_language_features": False,
         }
+
+    @classmethod
+    def _normalize_language_code(cls, language: str) -> str:
+        normalized = language.strip().lower().replace("_", "-")
+        return cls.LANGUAGE_ALIASES.get(normalized, normalized.replace("-", "_"))
 
     async def _collect_stream_text(self, resp) -> str:
         parts = []
@@ -213,7 +256,9 @@ class Kagi(commands.Cog):
 
         return final_text
 
-    async def _translate(self, text: str, to_lang: str, context: str = "") -> str:
+    async def _translate(
+        self, text: str, to_lang: str, context: str = "", from_lang: str = "auto"
+    ) -> str:
         kagi_session, translate_session = await self._get_auth()
         model = await self.config.model()
 
@@ -230,7 +275,14 @@ class Kagi(commands.Cog):
             "kagi_session": kagi_session,
             "translate_session": translate_session,
         }
-        payload = self._build_payload(text, to_lang, model, translate_session, context=context)
+        payload = self._build_payload(
+            text,
+            self._normalize_language_code(from_lang),
+            self._normalize_language_code(to_lang),
+            model,
+            translate_session,
+            context=context,
+        )
         session = await self._get_session()
 
         async with session.post(self.API_URL, headers=headers, cookies=cookies, json=payload) as resp:
@@ -330,6 +382,45 @@ class Kagi(commands.Cog):
                 return
 
         output = self._strip_echoed_prompt(output, prompt)
+        await self._send_output(ctx, output)
+
+    async def _run_translate_command(
+        self,
+        ctx: commands.Context,
+        text: Optional[str],
+        *,
+        to_lang: str = "en",
+        from_lang: str = "auto",
+        missing_text_message: str,
+    ):
+        kagi_session, translate_session = await self._get_auth()
+
+        if not kagi_session or not translate_session:
+            await ctx.send(
+                "Kagi auth is not configured. Use the owner setup commands first:\n"
+                "`!kagi setkagi <value>`\n"
+                "`!kagi settranslate <value>`"
+            )
+            return
+
+        target = await self._get_text(ctx, text)
+        if not target:
+            await ctx.send(missing_text_message)
+            return
+
+        target = self._normalize_custom_emoji_text(target)
+
+        if len(target) > 4000:
+            await ctx.send("That message is too long to translate.")
+            return
+
+        async with ctx.typing():
+            try:
+                output = await self._translate(target, to_lang, from_lang=from_lang)
+            except Exception as e:
+                await ctx.send(f"Error: {e}")
+                return
+
         await self._send_output(ctx, output)
 
     async def _send_owner_dm(self, ctx: commands.Context, message: str):
@@ -461,4 +552,47 @@ class Kagi(commands.Cog):
             ctx=ctx,
             text=text,
             mode_key="genz",
+        )
+
+    @commands.hybrid_command(name="translate", aliases=["tr"])
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def translate(self, ctx: commands.Context, *, text: Optional[str] = None):
+        """
+        Translate text with automatic language detection into English.
+
+        Usage:
+        - !translate some text here
+        - reply to a message with !translate
+        """
+        await self._run_translate_command(
+            ctx,
+            text,
+            to_lang="en",
+            from_lang="auto",
+            missing_text_message=(
+                "Provide text after `!translate` or reply to a message with `!translate`."
+            ),
+        )
+
+    @commands.hybrid_command(name="translateinto", aliases=["trto"])
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def translate_into(
+        self, ctx: commands.Context, target_language: str, *, text: Optional[str] = None
+    ):
+        """
+        Translate text with automatic language detection into a chosen language.
+
+        Usage:
+        - !translateinto spanish some text here
+        - !translateinto ja some text here
+        - reply to a message with !translateinto french
+        """
+        await self._run_translate_command(
+            ctx,
+            text,
+            to_lang=target_language,
+            from_lang="auto",
+            missing_text_message=(
+                "Provide text after `!translateinto <language>` or reply with that command."
+            ),
         )

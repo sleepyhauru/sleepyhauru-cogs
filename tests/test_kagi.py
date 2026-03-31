@@ -25,6 +25,23 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             "rng prompt\nReturn only the rewritten text.",
         )
 
+    def test_normalize_language_code_supports_aliases(self):
+        self.assertEqual(self.cog._normalize_language_code("english"), "en")
+        self.assertEqual(self.cog._normalize_language_code("pt-br"), "pt_br")
+        self.assertEqual(self.cog._normalize_language_code("detect"), "auto")
+
+    def test_build_payload_uses_supplied_languages(self):
+        payload = self.cog._build_payload(
+            "hola",
+            "auto",
+            "en",
+            "model-name",
+            "translate-token",
+        )
+
+        self.assertEqual(payload["from"], "auto")
+        self.assertEqual(payload["to"], "en")
+
     def test_choose_style_prompt_uses_mode_prompt(self):
         with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
             result = self.cog._choose_style_prompt("linkedin")
@@ -340,6 +357,74 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(kagi_module.random, "choice", return_value="rng prompt"):
             await self.cog._run_style_command(ctx, "hello", "linkedin")
         self.assertEqual(sent[-1], "Error: boom")
+
+    async def test_run_translate_command_defaults_to_auto_to_english(self):
+        sent = []
+        translate_calls = []
+
+        async def send(message, **kwargs):
+            sent.append((message, kwargs))
+
+        async def fake_translate(text, to_lang, context="", from_lang="auto"):
+            translate_calls.append((text, to_lang, context, from_lang))
+            return "hello"
+
+        async def fake_get_auth():
+            return "kagi-cookie", "translate-cookie"
+
+        self.cog._translate = fake_translate
+        self.cog._get_auth = fake_get_auth
+
+        ctx = types.SimpleNamespace(
+            send=send,
+            typing=lambda: self._typing_context(),
+            author=types.SimpleNamespace(id=42),
+            message=types.SimpleNamespace(reference=None),
+        )
+
+        await self.cog._run_translate_command(
+            ctx,
+            "hola",
+            missing_text_message="missing",
+        )
+
+        self.assertEqual(translate_calls, [("hola", "en", "", "auto")])
+        self.assertEqual(sent[0][0], "hello")
+        self.assertEqual(sent[0][1]["allowed_mentions"], "none")
+
+    async def test_translate_commands_delegate_to_shared_runner(self):
+        calls = []
+
+        async def fake_run_translate_command(
+            ctx, text, *, to_lang="en", from_lang="auto", missing_text_message
+        ):
+            calls.append((ctx, text, to_lang, from_lang, missing_text_message))
+
+        self.cog._run_translate_command = fake_run_translate_command
+        ctx = types.SimpleNamespace()
+
+        await self.cog.translate(ctx, text="bonjour")
+        await self.cog.translate_into(ctx, target_language="spanish", text="hello")
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    ctx,
+                    "bonjour",
+                    "en",
+                    "auto",
+                    "Provide text after `!translate` or reply to a message with `!translate`.",
+                ),
+                (
+                    ctx,
+                    "hello",
+                    "spanish",
+                    "auto",
+                    "Provide text after `!translateinto <language>` or reply with that command.",
+                ),
+            ],
+        )
 
     async def test_run_config_test_and_config_commands(self):
         sent = []
