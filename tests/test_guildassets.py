@@ -1,6 +1,7 @@
 import tempfile
 import types
 import unittest
+from hashlib import sha256
 from pathlib import Path
 
 from tests.support import load_module
@@ -31,6 +32,19 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         latest = self.cog._latest_export_dir(123)
 
         self.assertEqual(latest.name, "20260101T000000Z")
+
+    def test_list_and_get_export_dirs(self):
+        root = self.cog._guild_export_root(123)
+        older = root / "20250101T000000Z"
+        newer = root / "20260101T000000Z"
+        older.mkdir(parents=True)
+        newer.mkdir(parents=True)
+
+        export_dirs = self.cog._list_export_dirs(123)
+
+        self.assertEqual([path.name for path in export_dirs], ["20250101T000000Z", "20260101T000000Z"])
+        self.assertEqual(self.cog._get_export_dir(123, "20250101T000000Z"), older)
+        self.assertEqual(self.cog._get_export_dir(123, "missing"), None)
 
     async def test_export_guild_assets_writes_manifest_and_files(self):
         class FakeEmoji:
@@ -76,6 +90,8 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manifest["guild_id"], 321)
         self.assertEqual(len(manifest["emojis"]), 2)
         self.assertEqual(len(manifest["stickers"]), 1)
+        self.assertEqual(manifest["emojis"][0]["sha256"], sha256(b"wave-bytes").hexdigest())
+        self.assertEqual(manifest["stickers"][0]["sha256"], sha256(b"sticker-bytes").hexdigest())
         self.assertTrue((export_dir / manifest["emojis"][0]["filename"]).exists())
         self.assertTrue((export_dir / manifest["stickers"][0]["filename"]).exists())
 
@@ -87,16 +103,16 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         (export_dir / "emojis" / "002_dance.gif").write_bytes(b"emoji2-bytes")
         (export_dir / "stickers" / "001_hi.png").write_bytes(b"sticker-bytes")
         (export_dir / "manifest.json").write_text(
-            """{
+            f"""{{
   "guild_id": 555,
   "emojis": [
-    {"name": "wave", "animated": false, "filename": "emojis/001_wave.png"},
-    {"name": "dance", "animated": true, "filename": "emojis/002_dance.gif"}
+    {{"name": "wave", "animated": false, "filename": "emojis/001_wave.png", "sha256": "{sha256(b"emoji-bytes").hexdigest()}"}},
+    {{"name": "dance", "animated": true, "filename": "emojis/002_dance.gif", "sha256": "{sha256(b"emoji2-bytes").hexdigest()}"}}
   ],
   "stickers": [
-    {"name": "hi", "description": "desc", "emoji": "🙂", "filename": "stickers/001_hi.png"}
+    {{"name": "hi", "description": "desc", "emoji": "🙂", "filename": "stickers/001_hi.png", "sha256": "{sha256(b"sticker-bytes").hexdigest()}"}}
   ]
-}""",
+}}""",
             encoding="utf-8",
         )
 
@@ -127,3 +143,53 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["added_stickers"], ["hi"])
         self.assertEqual(results["skipped_stickers"], [])
         self.assertEqual(added_stickers, ["hi"])
+
+    async def test_import_guild_assets_skips_existing_name_and_hash_matches(self):
+        export_dir = self.cog._guild_export_root(777) / "20260330T000000Z"
+        (export_dir / "emojis").mkdir(parents=True)
+        (export_dir / "stickers").mkdir(parents=True)
+        (export_dir / "emojis" / "001_wave.png").write_bytes(b"same-emoji")
+        (export_dir / "stickers" / "001_hi.png").write_bytes(b"same-sticker")
+        (export_dir / "manifest.json").write_text(
+            """{
+  "guild_id": 777,
+  "emojis": [
+    {"name": "wave", "animated": false, "filename": "emojis/001_wave.png"}
+  ],
+  "stickers": [
+    {"name": "hi", "description": "desc", "emoji": "🙂", "filename": "stickers/001_hi.png"}
+  ]
+}""",
+            encoding="utf-8",
+        )
+
+        async def create_custom_emoji(**kwargs):
+            raise AssertionError("duplicate emoji should have been skipped")
+
+        async def create_sticker(**kwargs):
+            raise AssertionError("duplicate sticker should have been skipped")
+
+        guild = types.SimpleNamespace(
+            emojis=[types.SimpleNamespace(name="wave", animated=False, url="https://cdn.test/existing-wave.png")],
+            emoji_limit=5,
+            stickers=[types.SimpleNamespace(name="hi", url="https://cdn.test/existing-hi.png")],
+            sticker_limit=5,
+            create_custom_emoji=create_custom_emoji,
+            create_sticker=create_sticker,
+        )
+
+        async def fake_read_url(session, url):
+            payloads = {
+                "https://cdn.test/existing-wave.png": b"same-emoji",
+                "https://cdn.test/existing-hi.png": b"same-sticker",
+            }
+            return payloads[url]
+
+        self.cog._read_url = fake_read_url
+
+        results = await self.cog._import_guild_assets(guild, export_dir)
+
+        self.assertEqual(results["added_emojis"], [])
+        self.assertEqual(results["added_stickers"], [])
+        self.assertEqual(results["skipped_emojis"], ["wave (already exists)"])
+        self.assertEqual(results["skipped_stickers"], ["hi (already exists)"])

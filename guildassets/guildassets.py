@@ -1,8 +1,10 @@
 import json
 import re
+import shutil
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import aiohttp
 import discord
@@ -21,7 +23,7 @@ class GuildAssets(commands.Cog):
     """Owner-only guild emoji and sticker export/import tools."""
 
     __author__ = ["sleepyhauru"]
-    __version__ = "1.0.0"
+    __version__ = "1.2.0"
 
     def __init__(self, bot):
         self.bot = bot
@@ -65,13 +67,25 @@ class GuildAssets(commands.Cog):
         return self._guild_export_root(guild.id) / timestamp
 
     def _latest_export_dir(self, guild_id: int) -> Optional[Path]:
-        root = self._guild_export_root(guild_id)
-        if not root.exists():
-            return None
-        candidates = [path for path in root.iterdir() if path.is_dir()]
+        candidates = self._list_export_dirs(guild_id)
         if not candidates:
             return None
-        return sorted(candidates)[-1]
+        return candidates[-1]
+
+    def _list_export_dirs(self, guild_id: int) -> List[Path]:
+        root = self._guild_export_root(guild_id)
+        if not root.exists():
+            return []
+        return sorted(path for path in root.iterdir() if path.is_dir())
+
+    def _get_export_dir(self, guild_id: int, timestamp: Optional[str] = None) -> Optional[Path]:
+        if timestamp is None:
+            return self._latest_export_dir(guild_id)
+
+        candidate = self._guild_export_root(guild_id) / timestamp
+        if candidate.is_dir():
+            return candidate
+        return None
 
     async def _read_url(self, session: aiohttp.ClientSession, url: str) -> bytes:
         async with session.get(url) as resp:
@@ -99,6 +113,30 @@ class GuildAssets(commands.Cog):
                 pass
         return await self._read_url(session, str(sticker.url))
 
+    @staticmethod
+    def _hash_bytes(payload: bytes) -> str:
+        return sha256(payload).hexdigest()
+
+    async def _existing_emoji_keys(self, session: aiohttp.ClientSession, guild: discord.Guild) -> Set[Tuple[str, str]]:
+        keys = set()
+        for emoji in guild.emojis:
+            if not hasattr(emoji, "url"):
+                continue
+            payload = await self._download_emoji_bytes(session, emoji)
+            name = self._sanitize_emoji_name(getattr(emoji, "name", ""), "emoji")
+            keys.add((name, self._hash_bytes(payload)))
+        return keys
+
+    async def _existing_sticker_keys(self, session: aiohttp.ClientSession, guild: discord.Guild) -> Set[Tuple[str, str]]:
+        keys = set()
+        for sticker in guild.stickers:
+            if not hasattr(sticker, "url") and not hasattr(sticker, "save"):
+                continue
+            payload = await self._download_sticker_bytes(session, sticker)
+            name = self._sanitize_sticker_name(getattr(sticker, "name", ""), "sticker")
+            keys.add((name, self._hash_bytes(payload)))
+        return keys
+
     async def _export_guild_assets(self, guild: discord.Guild) -> Tuple[Path, Dict[str, int]]:
         export_dir = self._build_export_dir(guild)
         emoji_dir = export_dir / "emojis"
@@ -125,6 +163,7 @@ class GuildAssets(commands.Cog):
                         "name": emoji.name,
                         "animated": bool(getattr(emoji, "animated", False)),
                         "filename": f"emojis/{filename}",
+                        "sha256": self._hash_bytes(payload),
                     }
                 )
                 counts["emojis"] += 1
@@ -140,6 +179,7 @@ class GuildAssets(commands.Cog):
                         "description": getattr(sticker, "description", None) or DEFAULT_STICKER_DESCRIPTION,
                         "emoji": getattr(sticker, "emoji", None) or STICKER_EMOJI,
                         "filename": f"stickers/{filename}",
+                        "sha256": self._hash_bytes(payload),
                     }
                 )
                 counts["stickers"] += 1
@@ -159,34 +199,52 @@ class GuildAssets(commands.Cog):
             "skipped_stickers": [],
         }
 
-        for emoji in manifest.get("emojis", []):
-            animated = bool(emoji.get("animated"))
-            if self._remaining_emoji_slots(guild, animated) <= 0:
-                results["skipped_emojis"].append(f"{emoji['name']} (no {'animated' if animated else 'static'} slots)")
-                continue
+        async with aiohttp.ClientSession() as session:
+            existing_emoji_keys = await self._existing_emoji_keys(session, guild)
+            existing_sticker_keys = await self._existing_sticker_keys(session, guild)
 
-            path = export_dir / emoji["filename"]
-            name = self._sanitize_emoji_name(emoji["name"], f"emoji{len(results['added_emojis']) + 1}")
-            image = path.read_bytes()
-            await guild.create_custom_emoji(name=name, image=image, reason=f"Imported from guild {manifest.get('guild_id')}")
-            results["added_emojis"].append(name)
+            for emoji in manifest.get("emojis", []):
+                animated = bool(emoji.get("animated"))
+                path = export_dir / emoji["filename"]
+                name = self._sanitize_emoji_name(emoji["name"], f"emoji{len(results['added_emojis']) + 1}")
+                image = path.read_bytes()
+                asset_hash = emoji.get("sha256") or self._hash_bytes(image)
+                key = (name, asset_hash)
 
-        for sticker in manifest.get("stickers", []):
-            if len(guild.stickers) >= guild.sticker_limit:
-                results["skipped_stickers"].append(f"{sticker['name']} (no sticker slots)")
-                continue
+                if key in existing_emoji_keys:
+                    results["skipped_emojis"].append(f"{name} (already exists)")
+                    continue
+                if self._remaining_emoji_slots(guild, animated) <= 0:
+                    results["skipped_emojis"].append(f"{emoji['name']} (no {'animated' if animated else 'static'} slots)")
+                    continue
 
-            path = export_dir / sticker["filename"]
-            name = self._sanitize_sticker_name(sticker["name"], f"sticker {len(results['added_stickers']) + 1}")
-            file = discord.File(path)
-            await guild.create_sticker(
-                name=name,
-                description=sticker.get("description") or DEFAULT_STICKER_DESCRIPTION,
-                emoji=sticker.get("emoji") or STICKER_EMOJI,
-                file=file,
-                reason=f"Imported from guild {manifest.get('guild_id')}",
-            )
-            results["added_stickers"].append(name)
+                await guild.create_custom_emoji(name=name, image=image, reason=f"Imported from guild {manifest.get('guild_id')}")
+                existing_emoji_keys.add(key)
+                results["added_emojis"].append(name)
+
+            for sticker in manifest.get("stickers", []):
+                path = export_dir / sticker["filename"]
+                name = self._sanitize_sticker_name(sticker["name"], f"sticker {len(results['added_stickers']) + 1}")
+                asset_hash = sticker.get("sha256") or self._hash_bytes(path.read_bytes())
+                key = (name, asset_hash)
+
+                if key in existing_sticker_keys:
+                    results["skipped_stickers"].append(f"{name} (already exists)")
+                    continue
+                if len(guild.stickers) >= guild.sticker_limit:
+                    results["skipped_stickers"].append(f"{sticker['name']} (no sticker slots)")
+                    continue
+
+                file = discord.File(path)
+                await guild.create_sticker(
+                    name=name,
+                    description=sticker.get("description") or DEFAULT_STICKER_DESCRIPTION,
+                    emoji=sticker.get("emoji") or STICKER_EMOJI,
+                    file=file,
+                    reason=f"Imported from guild {manifest.get('guild_id')}",
+                )
+                existing_sticker_keys.add(key)
+                results["added_stickers"].append(name)
 
         return results
 
@@ -213,18 +271,56 @@ class GuildAssets(commands.Cog):
             f"To import into another server later, run `[p]guildassets import {guild.id}` there."
         )
 
+    @guildassets.command(name="list")
+    async def guildassets_list(self, ctx: commands.Context, source_guild_id: Optional[int] = None):
+        """List saved exports for a guild, or all guilds with exports."""
+        if source_guild_id is not None:
+            export_dirs = self._list_export_dirs(source_guild_id)
+            if not export_dirs:
+                await ctx.send(f"No exports found for guild ID `{source_guild_id}`.")
+                return
+
+            lines = [f"Exports for `{source_guild_id}`:"]
+            for export_dir in export_dirs:
+                lines.append(f"- `{export_dir.name}`")
+            await ctx.send("\n".join(lines))
+            return
+
+        root = self._exports_root()
+        if not root.exists():
+            await ctx.send("No exports found.")
+            return
+
+        guild_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+        if not guild_dirs:
+            await ctx.send("No exports found.")
+            return
+
+        lines = ["Saved export history:"]
+        for guild_dir in guild_dirs:
+            export_count = len([path for path in guild_dir.iterdir() if path.is_dir()])
+            if export_count:
+                lines.append(f"- `{guild_dir.name}`: {export_count} export{'s' if export_count != 1 else ''}")
+        if len(lines) == 1:
+            await ctx.send("No exports found.")
+            return
+        await ctx.send("\n".join(lines))
+
     @guildassets.command(name="import")
     @commands.bot_has_permissions(manage_emojis_and_stickers=True)
-    async def guildassets_import(self, ctx: commands.Context, source_guild_id: int):
-        """Import the latest export from another server into this one."""
+    async def guildassets_import(self, ctx: commands.Context, source_guild_id: int, timestamp: Optional[str] = None):
+        """Import a saved export from another server into this one."""
         guild = ctx.guild
         if guild is None:
             await ctx.send("This command only works in a server.")
             return
 
-        export_dir = self._latest_export_dir(source_guild_id)
+        export_dir = self._get_export_dir(source_guild_id, timestamp)
         if export_dir is None:
-            await ctx.send(f"No export found for guild ID `{source_guild_id}`.")
+            if timestamp is None:
+                await ctx.send(f"No export found for guild ID `{source_guild_id}`.")
+            else:
+                await ctx.send(f"No export `{timestamp}` found for guild ID `{source_guild_id}`.")
             return
 
         async with ctx.typing():
@@ -240,3 +336,14 @@ class GuildAssets(commands.Cog):
         if results["skipped_stickers"]:
             lines.append(f"Skipped stickers: {', '.join(results['skipped_stickers'])}")
         await ctx.send("\n".join(lines))
+
+    @guildassets.command(name="delete")
+    async def guildassets_delete(self, ctx: commands.Context, source_guild_id: int, timestamp: str):
+        """Delete one saved export by guild ID and timestamp."""
+        export_dir = self._get_export_dir(source_guild_id, timestamp)
+        if export_dir is None:
+            await ctx.send(f"No export `{timestamp}` found for guild ID `{source_guild_id}`.")
+            return
+
+        shutil.rmtree(export_dir)
+        await ctx.send(f"Deleted export `{timestamp}` for guild ID `{source_guild_id}`.")
