@@ -193,3 +193,52 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["added_stickers"], [])
         self.assertEqual(results["skipped_emojis"], ["wave (already exists)"])
         self.assertEqual(results["skipped_stickers"], ["hi (already exists)"])
+
+    async def test_import_guild_assets_retries_and_paces_emoji_uploads(self):
+        export_dir = self.cog._guild_export_root(888) / "20260330T000000Z"
+        (export_dir / "emojis").mkdir(parents=True)
+        (export_dir / "stickers").mkdir(parents=True)
+        (export_dir / "emojis" / "001_wave.png").write_bytes(b"emoji-bytes")
+        (export_dir / "manifest.json").write_text(
+            f"""{{
+  "guild_id": 888,
+  "emojis": [
+    {{"name": "wave", "animated": false, "filename": "emojis/001_wave.png", "sha256": "{sha256(b"emoji-bytes").hexdigest()}"}}
+  ],
+  "stickers": []
+}}""",
+            encoding="utf-8",
+        )
+
+        sleep_calls = []
+        original_sleep = guildassets_module.asyncio.sleep
+
+        async def fake_sleep(delay):
+            sleep_calls.append(delay)
+
+        guildassets_module.asyncio.sleep = fake_sleep
+
+        attempts = {"count": 0}
+
+        async def create_custom_emoji(**kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise load_module("discord").HTTPException("rate limited")
+
+        guild = types.SimpleNamespace(
+            emojis=[],
+            emoji_limit=5,
+            stickers=[],
+            sticker_limit=5,
+            create_custom_emoji=create_custom_emoji,
+            create_sticker=None,
+        )
+
+        try:
+            results = await self.cog._import_guild_assets(guild, export_dir)
+        finally:
+            guildassets_module.asyncio.sleep = original_sleep
+
+        self.assertEqual(results["added_emojis"], ["wave"])
+        self.assertEqual(attempts["count"], 2)
+        self.assertEqual(sleep_calls, [guildassets_module.EMOJI_UPLOAD_RETRY_BASE, guildassets_module.EMOJI_UPLOAD_DELAY])

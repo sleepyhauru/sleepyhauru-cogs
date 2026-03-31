@@ -1,10 +1,11 @@
+import asyncio
 import json
 import re
 import shutil
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 import discord
@@ -17,6 +18,10 @@ EMOJI_EXTENSIONS = {
 }
 STICKER_EMOJI = "\N{FRAME WITH PICTURE}"
 DEFAULT_STICKER_DESCRIPTION = "Imported sticker"
+EMOJI_UPLOAD_DELAY = 1.5
+EMOJI_UPLOAD_MAX_RETRIES = 3
+EMOJI_UPLOAD_RETRY_BASE = 3.0
+IMPORT_PROGRESS_EVERY = 5
 
 
 class GuildAssets(commands.Cog):
@@ -190,7 +195,25 @@ class GuildAssets(commands.Cog):
     def _load_manifest(self, export_dir: Path) -> dict:
         return json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
 
-    async def _import_guild_assets(self, guild: discord.Guild, export_dir: Path) -> Dict[str, List[str]]:
+    async def _create_emoji_with_retries(self, guild: discord.Guild, *, name: str, image: bytes, reason: str) -> None:
+        attempt = 0
+        while True:
+            try:
+                await guild.create_custom_emoji(name=name, image=image, reason=reason)
+                return
+            except discord.HTTPException:
+                attempt += 1
+                if attempt > EMOJI_UPLOAD_MAX_RETRIES:
+                    raise
+                await asyncio.sleep(EMOJI_UPLOAD_RETRY_BASE * attempt)
+
+    async def _import_guild_assets(
+        self,
+        guild: discord.Guild,
+        export_dir: Path,
+        *,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> Dict[str, List[str]]:
         manifest = self._load_manifest(export_dir)
         results = {
             "added_emojis": [],
@@ -198,6 +221,7 @@ class GuildAssets(commands.Cog):
             "added_stickers": [],
             "skipped_stickers": [],
         }
+        imported_emoji_count = 0
 
         async with aiohttp.ClientSession() as session:
             existing_emoji_keys = await self._existing_emoji_keys(session, guild)
@@ -218,9 +242,18 @@ class GuildAssets(commands.Cog):
                     results["skipped_emojis"].append(f"{emoji['name']} (no {'animated' if animated else 'static'} slots)")
                     continue
 
-                await guild.create_custom_emoji(name=name, image=image, reason=f"Imported from guild {manifest.get('guild_id')}")
+                await self._create_emoji_with_retries(
+                    guild,
+                    name=name,
+                    image=image,
+                    reason=f"Imported from guild {manifest.get('guild_id')}",
+                )
                 existing_emoji_keys.add(key)
                 results["added_emojis"].append(name)
+                imported_emoji_count += 1
+                if progress_callback is not None and imported_emoji_count % IMPORT_PROGRESS_EVERY == 0:
+                    await progress_callback(f"Imported {imported_emoji_count} emojis so far...")
+                await asyncio.sleep(EMOJI_UPLOAD_DELAY)
 
             for sticker in manifest.get("stickers", []):
                 path = export_dir / sticker["filename"]
@@ -324,7 +357,10 @@ class GuildAssets(commands.Cog):
             return
 
         async with ctx.typing():
-            results = await self._import_guild_assets(guild, export_dir)
+            async def progress_callback(message: str) -> None:
+                await ctx.send(message)
+
+            results = await self._import_guild_assets(guild, export_dir, progress_callback=progress_callback)
 
         lines = [
             f"Imported from `{source_guild_id}` into `{guild.name}` using `{export_dir.name}`.",
