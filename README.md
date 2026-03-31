@@ -51,7 +51,7 @@ Adds Kagi Translate tools, including `linkedin` and `genz` style rewrites plus o
 
 ### ModLog (`modlog`)
 
-Tracks moderator actions like bans, unbans, kicks, timeout changes, and cached message edits/deletes, then posts them in a configured mod-log channel.
+Tracks bans, unbans, kicks, joins, leaves, timeout changes, nickname and role updates, and cached message edits/deletes including bulk deletes, then posts them in a configured mod-log channel.
 
 ### No Fuck You (`nofuckyou`)
 

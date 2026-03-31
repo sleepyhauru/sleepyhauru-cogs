@@ -56,6 +56,34 @@ class ModLog(commands.Cog):
             return compact
         return compact[: limit - 3] + "..."
 
+    def _normalize_name(self, value: Optional[str]) -> str:
+        return self._truncate(value or "None", limit=256)
+
+    def _role_sort_key(self, role):
+        return getattr(role, "position", 0), getattr(role, "id", 0)
+
+    def _role_map(self, member) -> dict:
+        roles = getattr(member, "roles", None) or []
+        result = {}
+        for role in roles:
+            role_id = getattr(role, "id", None)
+            if role_id is None:
+                continue
+            result[role_id] = role
+        return result
+
+    def _role_label(self, role) -> str:
+        mention = getattr(role, "mention", None)
+        if mention:
+            return mention
+        return self._entity_label(role)
+
+    def _format_role_list(self, roles) -> str:
+        if not roles:
+            return "None"
+        ordered_roles = sorted(roles, key=self._role_sort_key, reverse=True)
+        return ", ".join(self._role_label(role) for role in ordered_roles)
+
     def _message_has_visible_state(self, message) -> bool:
         return any(
             [
@@ -201,6 +229,18 @@ class ModLog(commands.Cog):
 
         await self._send_embed(guild, embed)
 
+    async def _send_member_event(self, guild, *, title: str, color: int, member, extra_fields=None):
+        if await self._is_disabled_in_guild(guild):
+            return
+
+        embed = self._base_embed(title, color=color)
+        embed.description = self._entity_label(member)
+
+        for name, value in extra_fields or []:
+            embed.add_field(name=name, value=value)
+
+        await self._send_embed(guild, embed)
+
     async def _send_message_event(self, guild, *, title: str, color: int, message, before=None, after=None):
         if await self._is_disabled_in_guild(guild):
             return
@@ -244,6 +284,25 @@ class ModLog(commands.Cog):
         message_id = getattr(message, "id", None)
         if message_id is not None:
             embed.set_footer(text=f"Message ID: {message_id}")
+
+        await self._send_embed(guild, embed)
+
+    async def _send_bulk_message_delete_event(self, guild, *, channel, count: int, message_ids=None):
+        if await self._is_disabled_in_guild(guild):
+            return
+
+        embed = self._base_embed("Messages Bulk Deleted", color=0x6C757D)
+        channel_label = getattr(channel, "mention", None)
+        if not channel_label:
+            channel_id = getattr(channel, "id", None)
+            channel_label = f"<#{channel_id}>" if channel_id is not None else "#unknown"
+
+        embed.description = f"Channel: {channel_label}"
+        embed.add_field(name="Count", value=str(count))
+
+        if message_ids:
+            sample_ids = sorted(str(message_id) for message_id in list(message_ids)[:5])
+            embed.add_field(name="Sample Message IDs", value=", ".join(sample_ids))
 
         await self._send_embed(guild, embed)
 
@@ -300,50 +359,114 @@ class ModLog(commands.Cog):
     async def on_member_remove(self, member):
         guild = member.guild
         entry = await self._find_audit_entry(guild, "kick", getattr(member, "id", 0))
-        if entry is None:
+        if entry is not None:
+            await self._send_mod_action(
+                guild,
+                title="Member Kicked",
+                color=0xF0AD4E,
+                target=member,
+                moderator=getattr(entry, "user", None),
+                reason=getattr(entry, "reason", None),
+            )
             return
 
-        await self._send_mod_action(
+        extra_fields = []
+        joined_at = getattr(member, "joined_at", None)
+        if joined_at is not None:
+            extra_fields.append(("Joined Server", self._format_dt(joined_at)))
+
+        await self._send_member_event(
             guild,
-            title="Member Kicked",
-            color=0xF0AD4E,
-            target=member,
-            moderator=getattr(entry, "user", None),
-            reason=getattr(entry, "reason", None),
+            title="Member Left",
+            color=0x6C757D,
+            member=member,
+            extra_fields=extra_fields,
+        )
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member):
+        extra_fields = []
+        created_at = getattr(member, "created_at", None)
+        if created_at is not None:
+            extra_fields.append(("Account Created", self._format_dt(created_at)))
+
+        await self._send_member_event(
+            member.guild,
+            title="Member Joined",
+            color=0x5CB85C,
+            member=member,
+            extra_fields=extra_fields,
         )
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
+        guild = after.guild
         before_timeout = getattr(before, "timed_out_until", None)
         after_timeout = getattr(after, "timed_out_until", None)
-        if before_timeout == after_timeout:
-            return
+        if before_timeout != after_timeout:
+            entry = await self._find_audit_entry(guild, "member_update", getattr(after, "id", 0))
 
-        guild = after.guild
-        entry = await self._find_audit_entry(guild, "member_update", getattr(after, "id", 0))
+            if before_timeout is None and after_timeout is not None:
+                title = "Member Timed Out"
+                extra_fields = [("Until", self._format_dt(after_timeout))]
+            elif before_timeout is not None and after_timeout is None:
+                title = "Member Timeout Removed"
+                extra_fields = [("Previous Timeout", self._format_dt(before_timeout))]
+            else:
+                title = "Member Timeout Updated"
+                extra_fields = [
+                    ("Previous Timeout", self._format_dt(before_timeout)),
+                    ("New Timeout", self._format_dt(after_timeout)),
+                ]
 
-        if before_timeout is None and after_timeout is not None:
-            title = "Member Timed Out"
-            extra_fields = [("Until", self._format_dt(after_timeout))]
-        elif before_timeout is not None and after_timeout is None:
-            title = "Member Timeout Removed"
-            extra_fields = [("Previous Timeout", self._format_dt(before_timeout))]
-        else:
-            title = "Member Timeout Updated"
-            extra_fields = [
-                ("Previous Timeout", self._format_dt(before_timeout)),
-                ("New Timeout", self._format_dt(after_timeout)),
-            ]
+            await self._send_mod_action(
+                guild,
+                title=title,
+                color=0x5BC0DE,
+                target=after,
+                moderator=getattr(entry, "user", None),
+                reason=getattr(entry, "reason", None),
+                extra_fields=extra_fields,
+            )
 
-        await self._send_mod_action(
-            guild,
-            title=title,
-            color=0x5BC0DE,
-            target=after,
-            moderator=getattr(entry, "user", None),
-            reason=getattr(entry, "reason", None),
-            extra_fields=extra_fields,
-        )
+        before_nick = getattr(before, "nick", None)
+        after_nick = getattr(after, "nick", None)
+        if before_nick != after_nick:
+            entry = await self._find_audit_entry(guild, "member_update", getattr(after, "id", 0))
+            await self._send_mod_action(
+                guild,
+                title="Member Nickname Changed",
+                color=0x5BC0DE,
+                target=after,
+                moderator=getattr(entry, "user", None),
+                reason=getattr(entry, "reason", None),
+                extra_fields=[
+                    ("Before", self._normalize_name(before_nick)),
+                    ("After", self._normalize_name(after_nick)),
+                ],
+            )
+
+        before_roles = self._role_map(before)
+        after_roles = self._role_map(after)
+        added_roles = [after_roles[role_id] for role_id in after_roles.keys() - before_roles.keys()]
+        removed_roles = [before_roles[role_id] for role_id in before_roles.keys() - after_roles.keys()]
+        if added_roles or removed_roles:
+            entry = await self._find_audit_entry(guild, "member_role_update", getattr(after, "id", 0))
+            extra_fields = []
+            if added_roles:
+                extra_fields.append(("Added Roles", self._format_role_list(added_roles)))
+            if removed_roles:
+                extra_fields.append(("Removed Roles", self._format_role_list(removed_roles)))
+
+            await self._send_mod_action(
+                guild,
+                title="Member Roles Updated",
+                color=0x5BC0DE,
+                target=after,
+                moderator=getattr(entry, "user", None),
+                reason=getattr(entry, "reason", None),
+                extra_fields=extra_fields,
+            )
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -391,6 +514,52 @@ class ModLog(commands.Cog):
             return
 
         await self._send_raw_delete_event(guild, channel_id, message_id)
+
+    @commands.Cog.listener()
+    async def on_bulk_message_delete(self, messages):
+        messages = list(messages or [])
+        if not messages:
+            return
+
+        first_message = messages[0]
+        guild = getattr(first_message, "guild", None)
+        channel = getattr(first_message, "channel", None)
+        if guild is None or channel is None:
+            return
+
+        for message in messages:
+            message_id = getattr(message, "id", None)
+            if message_id is not None:
+                self._pop_message_snapshot(message_id)
+
+        await self._send_bulk_message_delete_event(guild, channel=channel, count=len(messages))
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload):
+        cached_messages = getattr(payload, "cached_messages", None)
+        if cached_messages:
+            return
+
+        guild_id = getattr(payload, "guild_id", None)
+        channel_id = getattr(payload, "channel_id", None)
+        message_ids = getattr(payload, "message_ids", None)
+        if guild_id is None or channel_id is None or not message_ids:
+            return
+
+        guild = getattr(self.bot, "get_guild", lambda _guild_id: None)(guild_id)
+        if guild is None:
+            return
+
+        channel = getattr(guild, "get_channel", lambda _channel_id: None)(channel_id)
+        for message_id in message_ids:
+            self._pop_message_snapshot(message_id)
+
+        await self._send_bulk_message_delete_event(
+            guild,
+            channel=channel,
+            count=len(message_ids),
+            message_ids=message_ids,
+        )
 
     @commands.Cog.listener()
     async def on_message_edit(self, before, after):

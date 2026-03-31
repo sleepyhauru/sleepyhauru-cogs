@@ -11,6 +11,7 @@ discord.AuditLogAction = types.SimpleNamespace(
     unban="unban",
     kick="kick",
     member_update="member_update",
+    member_role_update="member_role_update",
 )
 modlog_module = load_module("modlog.modlog")
 
@@ -95,7 +96,7 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.fields[0].value, "Mod (50)")
         self.assertEqual(embed.fields[1].value, "Rule 1")
 
-    async def test_on_member_remove_ignores_regular_leaves(self):
+    async def test_on_member_join_logs_new_member(self):
         sent_embeds = []
 
         async def send(*, embed):
@@ -104,16 +105,85 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         guild = types.SimpleNamespace(
             id=3,
             get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
-            audit_logs=lambda **kwargs: AsyncIterator([]),
         )
         self.guilds[guild.id] = guild
-        member = types.SimpleNamespace(id=20, name="User", guild=guild)
+        member = types.SimpleNamespace(
+            id=20,
+            name="User",
+            guild=guild,
+            created_at=datetime.now(timezone.utc) - timedelta(days=30),
+        )
         await self.cog.config.guild(guild).enabled.set(True)
         await self.cog.config.guild(guild).channel_id.set(456)
 
+        await self.cog.on_member_join(member)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Member Joined")
+        self.assertEqual(embed.description, "User (20)")
+        self.assertEqual(embed.fields[0].name, "Account Created")
+
+    async def test_on_member_remove_logs_regular_leaves(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=31,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
+            audit_logs=lambda **kwargs: AsyncIterator([]),
+        )
+        self.guilds[guild.id] = guild
+        member = types.SimpleNamespace(
+            id=21,
+            name="User",
+            guild=guild,
+            joined_at=datetime.now(timezone.utc) - timedelta(days=7),
+        )
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(457)
+
         await self.cog.on_member_remove(member)
 
-        self.assertEqual(sent_embeds, [])
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Member Left")
+        self.assertEqual(embed.description, "User (21)")
+        self.assertEqual(embed.fields[0].name, "Joined Server")
+
+    async def test_on_member_remove_logs_kicks(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        moderator = types.SimpleNamespace(id=51, name="Mod")
+        target = types.SimpleNamespace(id=22, name="User")
+        entry = types.SimpleNamespace(
+            target=target,
+            user=moderator,
+            reason="Escalation",
+            created_at=datetime.now(timezone.utc),
+        )
+        guild = types.SimpleNamespace(
+            id=32,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
+            audit_logs=lambda **kwargs: AsyncIterator([entry]),
+        )
+        self.guilds[guild.id] = guild
+        member = types.SimpleNamespace(id=22, name="User", guild=guild)
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(458)
+
+        await self.cog.on_member_remove(member)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Member Kicked")
+        self.assertEqual(embed.fields[0].value, "Mod (51)")
+        self.assertEqual(embed.fields[1].value, "Escalation")
 
     async def test_on_member_update_logs_timeout_changes(self):
         sent_embeds = []
@@ -153,6 +223,94 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.fields[0].value, "Mod (55)")
         self.assertEqual(embed.fields[1].value, "Cooling off")
         self.assertEqual(embed.fields[2].name, "Until")
+
+    async def test_on_member_update_logs_nickname_changes(self):
+        sent_embeds = []
+        moderator = types.SimpleNamespace(id=56, name="Mod")
+        target = types.SimpleNamespace(id=45, display_name="Target")
+        entry = types.SimpleNamespace(
+            target=target,
+            user=moderator,
+            reason="Cleanup",
+            created_at=datetime.now(timezone.utc),
+        )
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=41,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
+            audit_logs=lambda **kwargs: AsyncIterator([entry]) if kwargs.get("action") == "member_update" else AsyncIterator([]),
+        )
+        self.guilds[guild.id] = guild
+        before = types.SimpleNamespace(id=45, guild=guild, nick="Old Nick", timed_out_until=None, roles=[])
+        after = types.SimpleNamespace(
+            id=45,
+            guild=guild,
+            display_name="Target",
+            nick="New Nick",
+            timed_out_until=None,
+            roles=[],
+        )
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(790)
+
+        await self.cog.on_member_update(before, after)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Member Nickname Changed")
+        self.assertEqual(embed.fields[0].value, "Mod (56)")
+        self.assertEqual(embed.fields[1].value, "Cleanup")
+        self.assertEqual(embed.fields[2].value, "Old Nick")
+        self.assertEqual(embed.fields[3].value, "New Nick")
+
+    async def test_on_member_update_logs_role_changes(self):
+        sent_embeds = []
+        moderator = types.SimpleNamespace(id=57, name="Mod")
+        target = types.SimpleNamespace(id=46, display_name="Target")
+        entry = types.SimpleNamespace(
+            target=target,
+            user=moderator,
+            reason="Promotion",
+            created_at=datetime.now(timezone.utc),
+        )
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=42,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, send=send),
+            audit_logs=lambda **kwargs: AsyncIterator([entry]) if kwargs.get("action") == "member_role_update" else AsyncIterator([]),
+        )
+        self.guilds[guild.id] = guild
+        muted = types.SimpleNamespace(id=101, name="Muted", position=1, mention="<@&101>")
+        helper = types.SimpleNamespace(id=102, name="Helper", position=2, mention="<@&102>")
+        before = types.SimpleNamespace(id=46, guild=guild, nick=None, timed_out_until=None, roles=[muted])
+        after = types.SimpleNamespace(
+            id=46,
+            guild=guild,
+            display_name="Target",
+            nick=None,
+            timed_out_until=None,
+            roles=[helper],
+        )
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(791)
+
+        await self.cog.on_member_update(before, after)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Member Roles Updated")
+        self.assertEqual(embed.fields[0].value, "Mod (57)")
+        self.assertEqual(embed.fields[1].value, "Promotion")
+        self.assertEqual(embed.fields[2].name, "Added Roles")
+        self.assertEqual(embed.fields[2].value, "<@&102>")
+        self.assertEqual(embed.fields[3].name, "Removed Roles")
+        self.assertEqual(embed.fields[3].value, "<@&101>")
 
     async def test_find_audit_entry_skips_stale_entries(self):
         target = types.SimpleNamespace(id=70, name="User")
@@ -451,6 +609,62 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         await self.cog.on_raw_message_delete(payload)
 
         self.assertEqual(sent_embeds, [])
+
+    async def test_on_bulk_message_delete_logs_summary(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=81,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, mention="#mods", send=send),
+        )
+        self.guilds[guild.id] = guild
+        channel = types.SimpleNamespace(id=880, name="mods", mention="#mods")
+        message_one = types.SimpleNamespace(id=1, guild=guild, channel=channel)
+        message_two = types.SimpleNamespace(id=2, guild=guild, channel=channel)
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(880)
+
+        await self.cog.on_bulk_message_delete([message_one, message_two])
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Messages Bulk Deleted")
+        self.assertEqual(embed.description, "Channel: #mods")
+        self.assertEqual(embed.fields[0].name, "Count")
+        self.assertEqual(embed.fields[0].value, "2")
+
+    async def test_on_raw_bulk_message_delete_logs_uncached_summary(self):
+        sent_embeds = []
+
+        async def send(*, embed):
+            sent_embeds.append(embed)
+
+        guild = types.SimpleNamespace(
+            id=82,
+            get_channel=lambda channel_id: types.SimpleNamespace(id=channel_id, mention="#mods", send=send),
+        )
+        self.guilds[guild.id] = guild
+        await self.cog.config.guild(guild).enabled.set(True)
+        await self.cog.config.guild(guild).channel_id.set(881)
+
+        payload = types.SimpleNamespace(
+            guild_id=82,
+            channel_id=881,
+            message_ids={333, 111, 222},
+            cached_messages=[],
+        )
+
+        await self.cog.on_raw_bulk_message_delete(payload)
+
+        self.assertEqual(len(sent_embeds), 1)
+        embed = sent_embeds[0]
+        self.assertEqual(embed.title, "Messages Bulk Deleted")
+        self.assertEqual(embed.fields[0].value, "3")
+        self.assertEqual(embed.fields[1].name, "Sample Message IDs")
+        self.assertEqual(embed.fields[1].value, "111, 222, 333")
 
 
 if __name__ == "__main__":
