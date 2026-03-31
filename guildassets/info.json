@@ -1,0 +1,12 @@
+{
+    "author": ["sleepyhauru"],
+    "min_bot_version": "3.5.0",
+    "description": "Owner-only tools to export a server's emojis and stickers into the bot's data folder and import them into another server later.",
+    "hidden": false,
+    "install_msg": "GuildAssets installed. Load it with [p]load guildassets, then use [p]guildassets export in the source server and [p]guildassets import <source_guild_id> in the destination server.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Export and import a guild's emojis and stickers.",
+    "end_user_data_statement": "This cog stores exported guild emoji and sticker files along with their names and metadata until you delete them.",
+    "tags": ["emoji", "sticker", "backup", "export", "import", "owner"]
+}

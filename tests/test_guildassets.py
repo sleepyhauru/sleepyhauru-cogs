@@ -1,0 +1,129 @@
+import tempfile
+import types
+import unittest
+from pathlib import Path
+
+from tests.support import load_module
+
+
+guildassets_module = load_module("guildassets.guildassets")
+
+
+class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        guildassets_module.cog_data_path = lambda cog: Path(self.tmp.name)
+        self.cog = guildassets_module.GuildAssets(types.SimpleNamespace())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_name_sanitizers(self):
+        self.assertEqual(self.cog._slugify_name("party time!!.png", "fallback"), "party_time_.png")
+        self.assertEqual(self.cog._sanitize_emoji_name("!!", "fallback"), "fallback")
+        self.assertEqual(self.cog._sanitize_sticker_name("   ", "fallback"), "fallback")
+
+    def test_latest_export_dir_chooses_newest_timestamp(self):
+        root = self.cog._guild_export_root(123)
+        (root / "20250101T000000Z").mkdir(parents=True)
+        (root / "20260101T000000Z").mkdir(parents=True)
+
+        latest = self.cog._latest_export_dir(123)
+
+        self.assertEqual(latest.name, "20260101T000000Z")
+
+    async def test_export_guild_assets_writes_manifest_and_files(self):
+        class FakeEmoji:
+            def __init__(self, name, animated, url):
+                self.name = name
+                self.animated = animated
+                self.url = url
+
+        class FakeSticker:
+            def __init__(self, name, url, description=None, emoji=None):
+                self.name = name
+                self.url = url
+                self.description = description
+                self.emoji = emoji
+
+        payloads = {
+            "https://cdn.test/wave.png": b"wave-bytes",
+            "https://cdn.test/dance.gif": b"dance-bytes",
+            "https://cdn.test/sticker.png": b"sticker-bytes",
+        }
+
+        async def fake_read_url(session, url):
+            return payloads[url]
+
+        self.cog._read_url = fake_read_url
+
+        guild = types.SimpleNamespace(
+            id=321,
+            name="Source Guild",
+            emojis=[
+                FakeEmoji("wave", False, "https://cdn.test/wave.png"),
+                FakeEmoji("dance", True, "https://cdn.test/dance.gif"),
+            ],
+            stickers=[
+                FakeSticker("hello sticker", "https://cdn.test/sticker.png", description="desc", emoji="🙂"),
+            ],
+        )
+
+        export_dir, counts = await self.cog._export_guild_assets(guild)
+
+        self.assertEqual(counts, {"emojis": 2, "stickers": 1})
+        manifest = self.cog._load_manifest(export_dir)
+        self.assertEqual(manifest["guild_id"], 321)
+        self.assertEqual(len(manifest["emojis"]), 2)
+        self.assertEqual(len(manifest["stickers"]), 1)
+        self.assertTrue((export_dir / manifest["emojis"][0]["filename"]).exists())
+        self.assertTrue((export_dir / manifest["stickers"][0]["filename"]).exists())
+
+    async def test_import_guild_assets_creates_items_and_reports_slot_skips(self):
+        export_dir = self.cog._guild_export_root(555) / "20260330T000000Z"
+        (export_dir / "emojis").mkdir(parents=True)
+        (export_dir / "stickers").mkdir(parents=True)
+        (export_dir / "emojis" / "001_wave.png").write_bytes(b"emoji-bytes")
+        (export_dir / "emojis" / "002_dance.gif").write_bytes(b"emoji2-bytes")
+        (export_dir / "stickers" / "001_hi.png").write_bytes(b"sticker-bytes")
+        (export_dir / "manifest.json").write_text(
+            """{
+  "guild_id": 555,
+  "emojis": [
+    {"name": "wave", "animated": false, "filename": "emojis/001_wave.png"},
+    {"name": "dance", "animated": true, "filename": "emojis/002_dance.gif"}
+  ],
+  "stickers": [
+    {"name": "hi", "description": "desc", "emoji": "🙂", "filename": "stickers/001_hi.png"}
+  ]
+}""",
+            encoding="utf-8",
+        )
+
+        added_emojis = []
+        added_stickers = []
+
+        async def create_custom_emoji(**kwargs):
+            added_emojis.append(kwargs["name"])
+            guild.emojis.append(types.SimpleNamespace(animated=kwargs["image"].startswith(b"emoji2")))
+
+        async def create_sticker(**kwargs):
+            added_stickers.append(kwargs["name"])
+            guild.stickers.append(types.SimpleNamespace(name=kwargs["name"]))
+
+        guild = types.SimpleNamespace(
+            emojis=[types.SimpleNamespace(animated=False)],
+            emoji_limit=1,
+            stickers=[],
+            sticker_limit=1,
+            create_custom_emoji=create_custom_emoji,
+            create_sticker=create_sticker,
+        )
+
+        results = await self.cog._import_guild_assets(guild, export_dir)
+
+        self.assertEqual(results["added_emojis"], ["dance"])
+        self.assertEqual(results["skipped_emojis"], ["wave (no static slots)"])
+        self.assertEqual(results["added_stickers"], ["hi"])
+        self.assertEqual(results["skipped_stickers"], [])
+        self.assertEqual(added_stickers, ["hi"])

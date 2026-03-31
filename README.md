@@ -39,6 +39,10 @@ Lets users steal emojis and stickers from replied-to messages, return their asse
 
 ![EmojiSteal example](docs/screenshots/emojisteal.png)
 
+### GuildAssets (`guildassets`)
+
+Owner-only backup tools for server emojis and stickers. Export a guild's current assets into the bot's data folder, then import the latest export into another server with the same bot.
+
 ### Kagi (`kagi`)
 
 Adds Kagi Translate tools, including `linkedin` and `genz` style rewrites plus owner-only setup and auth test commands. Custom Discord emoji are normalized before style rewrites so they can be passed to Kagi cleanly.
