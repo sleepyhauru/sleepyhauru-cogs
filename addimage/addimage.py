@@ -2,6 +2,7 @@ import asyncio
 import mimetypes
 import os
 import random
+import shutil
 import string
 from pathlib import Path
 from typing import Literal, Optional, cast
@@ -23,7 +24,7 @@ class AddImage(commands.Cog):
     """
 
     __author__ = ["sleepyhauru"]
-    __version__ = "1.3.5"
+    __version__ = "1.3.6"
 
     def __init__(self, bot):
         self.bot = bot
@@ -137,6 +138,11 @@ class AddImage(commands.Cog):
 
     async def get_image_path(self, image: dict, guild: Optional[discord.Guild] = None) -> Path:
         return await self.get_directory(guild) / image["file_loc"]
+
+    def _generate_storage_filename(self, original_filename: str) -> str:
+        seed = "".join(random.sample(string.ascii_uppercase + string.digits, k=5))
+        suffix = self._safe_storage_extension(original_filename)
+        return f"{seed}{suffix}"
 
     async def validate_attachment(self, attachment: discord.Attachment) -> Optional[str]:
         suffix = Path(attachment.filename).suffix.lower()
@@ -565,9 +571,7 @@ class AddImage(commands.Cog):
     async def save_image_location(
         self, msg: discord.Message, name: str, guild: Optional[discord.Guild] = None
     ) -> None:
-        seed = "".join(random.sample(string.ascii_uppercase + string.digits, k=5))
-        suffix = self._safe_storage_extension(msg.attachments[0].filename)
-        filename = f"{seed}{suffix}"
+        filename = self._generate_storage_filename(msg.attachments[0].filename)
         if guild is not None:
             directory = await self.get_directory(guild)
             cur_images = await self.config.guild(guild).images()
@@ -592,6 +596,35 @@ class AddImage(commands.Cog):
             await self.config.guild(guild).images.set(cur_images)
         else:
             await self.config.images.set(cur_images)
+
+    async def copy_image_location(
+        self,
+        image: dict,
+        source_guild: discord.Guild,
+        destination_guild: discord.Guild,
+        new_name: str,
+    ) -> None:
+        source_path = await self.get_image_path(image, source_guild)
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+
+        directory = await self.get_directory(destination_guild)
+        await self.make_guild_folder(directory)
+
+        filename = self._generate_storage_filename(image["file_loc"])
+        destination_path = directory / filename
+        shutil.copy2(source_path, destination_path)
+
+        destination_images = await self.config.guild(destination_guild).images()
+        destination_images.append(
+            {
+                "command_name": new_name.lower(),
+                "count": 0,
+                "file_loc": filename,
+                "author": image["author"],
+            }
+        )
+        await self.config.guild(destination_guild).images.set(destination_images)
 
     async def wait_for_image(self, ctx: commands.Context) -> Optional[discord.Message]:
         msg = None
@@ -642,6 +675,57 @@ class AddImage(commands.Cog):
                 return
             await self.save_image_location(ctx.message, name, guild)
         await ctx.send(name + " has been added to my files!")
+
+    @addimage.command(name="copy", aliases=["transfer"])
+    @checks.mod_or_permissions(manage_channels=True)
+    async def copy_image_guild(
+        self,
+        ctx: commands.Context,
+        source_server: discord.Guild,
+        name: str,
+        new_name: Optional[str] = None,
+    ) -> None:
+        """
+        Copy a saved image from another server into this one.
+
+        The current server is always the destination. The `transfer` alias copies;
+        it does not remove the source image.
+        """
+        destination_guild = ctx.guild
+        if destination_guild is None:
+            await ctx.send("This command can only be used in a server.")
+            return
+
+        name = name.lower()
+        target_name = (new_name or name).lower()
+
+        if await self.check_command_exists(target_name, destination_guild):
+            await ctx.send(f"`{target_name}` is already in use in this server.")
+            return
+
+        image = await self.get_image(name, source_server)
+        if not image:
+            await ctx.send(f"`{name}` is not an image in `{source_server.name}`.")
+            return
+
+        try:
+            await self.copy_image_location(image, source_server, destination_guild, target_name)
+        except FileNotFoundError:
+            await ctx.send(
+                f"The source file for `{name}` is missing from `{source_server.name}`. "
+                "Run `addimage clean_deleted_images` there first."
+            )
+            return
+
+        if target_name == name:
+            await ctx.send(
+                f"Copied `{name}` from `{source_server.name}` to `{destination_guild.name}`."
+            )
+        else:
+            await ctx.send(
+                f"Copied `{name}` from `{source_server.name}` to `{destination_guild.name}` "
+                f"as `{target_name}`."
+            )
 
     @checks.is_owner()
     @addimage.command(name="addglobal")

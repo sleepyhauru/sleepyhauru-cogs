@@ -2,6 +2,7 @@ import asyncio
 import shutil
 import types
 import unittest
+import uuid
 from pathlib import Path
 
 from tests.support import load_module
@@ -12,16 +13,22 @@ addimage_module = load_module("addimage.addimage")
 
 class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.tmp_root = Path(__file__).resolve().parent / "_tmp_addimage" / uuid.uuid4().hex
+        self.tmp_root.mkdir(parents=True, exist_ok=True)
+        self.original_cog_data_path = addimage_module.cog_data_path
+        addimage_module.cog_data_path = lambda cog: self.tmp_root
+
         bot = types.SimpleNamespace(
             get_command=lambda name: None,
             user=types.SimpleNamespace(display_name="Bot", display_avatar="avatar"),
         )
         self.cog = addimage_module.AddImage(bot)
         self.guild = types.SimpleNamespace(id=123, name="Guild")
-        self.data_dir = Path("/tmp/codex-cog-data") / str(self.guild.id)
+        self.data_dir = self.tmp_root / str(self.guild.id)
 
     def tearDown(self):
-        shutil.rmtree(self.data_dir, ignore_errors=True)
+        addimage_module.cog_data_path = self.original_cog_data_path
+        shutil.rmtree(self.tmp_root, ignore_errors=True)
 
     async def test_first_word_lowercases_first_token(self):
         self.assertEqual(await self.cog.first_word("Hello There Friend"), "hello")
@@ -71,6 +78,14 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog._safe_storage_extension("image.png"), ".png")
         self.assertEqual(self.cog._safe_storage_extension("../../weird/../photo.jpeg"), ".jpeg")
         self.assertEqual(self.cog._safe_storage_extension("avatar.jpe"), ".jpg")
+
+    def test_generate_storage_filename_keeps_only_safe_suffix(self):
+        generated = self.cog._generate_storage_filename("../../weird/../photo.jpeg")
+
+        self.assertTrue(generated.endswith(".jpeg"))
+        self.assertNotIn("/", generated)
+        self.assertNotIn("\\", generated)
+        self.assertNotIn("..", generated)
 
     async def test_wait_for_image_returns_exit_message_and_notifies_user(self):
         sent = []
@@ -284,6 +299,85 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("..", stored_name)
         self.assertTrue(stored_name.endswith(".png"))
         self.assertEqual(saved_paths[0], self.data_dir / stored_name)
+
+    async def test_copy_image_location_copies_file_and_resets_count(self):
+        source_guild = types.SimpleNamespace(id=222, name="Source")
+        destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        source_dir = self.tmp_root / str(source_guild.id)
+        destination_dir = self.tmp_root / str(destination_guild.id)
+        shutil.rmtree(source_dir, ignore_errors=True)
+        shutil.rmtree(destination_dir, ignore_errors=True)
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "origin.png").write_bytes(b"image-bytes")
+
+        image = {"command_name": "old", "count": 9, "file_loc": "origin.png", "author": 42}
+
+        await self.cog.copy_image_location(image, source_guild, destination_guild, "newname")
+
+        images = await self.cog.config.guild(destination_guild).images()
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["command_name"], "newname")
+        self.assertEqual(images[0]["count"], 0)
+        self.assertEqual(images[0]["author"], 42)
+        copied_path = destination_dir / images[0]["file_loc"]
+        self.assertTrue(copied_path.is_file())
+        self.assertEqual(copied_path.read_bytes(), b"image-bytes")
+
+    async def test_copy_image_guild_copies_from_source_guild(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        source_guild = types.SimpleNamespace(id=222, name="Source")
+        destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        await self.cog.config.guild(source_guild).images.set(
+            [{"command_name": "cat", "count": 4, "file_loc": "origin.png", "author": 7}]
+        )
+
+        called = []
+
+        async def fake_copy(image, source, destination, new_name):
+            called.append((image, source, destination, new_name))
+
+        self.cog.copy_image_location = fake_copy
+        ctx = types.SimpleNamespace(guild=destination_guild, send=send)
+
+        await self.cog.copy_image_guild(ctx, source_guild, "cat")
+
+        self.assertEqual(len(called), 1)
+        self.assertEqual(called[0][1], source_guild)
+        self.assertEqual(called[0][2], destination_guild)
+        self.assertEqual(called[0][3], "cat")
+        self.assertEqual(sent, ["Copied `cat` from `Source` to `Destination`."])
+
+    async def test_copy_image_guild_reports_missing_source_file(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        source_guild = types.SimpleNamespace(id=222, name="Source")
+        destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        await self.cog.config.guild(source_guild).images.set(
+            [{"command_name": "cat", "count": 4, "file_loc": "origin.png", "author": 7}]
+        )
+
+        async def fake_copy(image, source, destination, new_name):
+            raise FileNotFoundError("origin.png")
+
+        self.cog.copy_image_location = fake_copy
+        ctx = types.SimpleNamespace(guild=destination_guild, send=send)
+
+        await self.cog.copy_image_guild(ctx, source_guild, "cat")
+
+        self.assertEqual(
+            sent,
+            [
+                "The source file for `cat` is missing from `Source`. "
+                "Run `addimage clean_deleted_images` there first."
+            ],
+        )
 
 
 if __name__ == "__main__":
