@@ -15,16 +15,17 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 log = getLogger("red.sleepyhauru-cogs.addimage")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 DEFAULT_MAX_FILE_SIZE = 8 * 1024 * 1024
 
 
 class AddImage(commands.Cog):
     """
-    Add images the bot can upload
+    Add saved media the bot can upload
     """
 
     __author__ = ["sleepyhauru"]
-    __version__ = "1.3.6"
+    __version__ = "1.3.7"
 
     def __init__(self, bot):
         self.bot = bot
@@ -146,10 +147,10 @@ class AddImage(commands.Cog):
 
     async def validate_attachment(self, attachment: discord.Attachment) -> Optional[str]:
         suffix = Path(attachment.filename).suffix.lower()
-        if suffix not in IMAGE_EXTENSIONS:
+        if suffix not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
             guessed_type, _ = mimetypes.guess_type(attachment.filename)
-            if not guessed_type or not guessed_type.startswith("image/"):
-                return "That attachment is not a supported image type."
+            if not guessed_type or not guessed_type.startswith(("image/", "video/")):
+                return "That attachment is not a supported image or video type."
 
         max_file_size = await self.config.max_file_size()
         if attachment.size > max_file_size:
@@ -167,7 +168,7 @@ class AddImage(commands.Cog):
             return suffix
 
         guessed_type, _ = mimetypes.guess_type(filename)
-        if not guessed_type or not guessed_type.startswith("image/"):
+        if not guessed_type or not guessed_type.startswith(("image/", "video/")):
             return ""
 
         guessed_ext = (mimetypes.guess_extension(guessed_type) or "").lower()
@@ -299,7 +300,7 @@ class AddImage(commands.Cog):
     @commands.guild_only()
     async def addimage(self, ctx: commands.Context) -> None:
         """
-        Add an image for the bot to directly upload
+        Add saved media for the bot to directly upload
         """
         pass
 
@@ -313,7 +314,7 @@ class AddImage(commands.Cog):
             await ctx.send("Size must be at least 1 MB.")
             return
         await self.config.max_file_size.set(size_mb * 1024 * 1024)
-        await ctx.send(f"Max image upload size set to {size_mb} MB.")
+        await ctx.send(f"Max upload size set to {size_mb} MB.")
 
     @checks.is_owner()
     @addimage.command()
@@ -355,7 +356,7 @@ class AddImage(commands.Cog):
             image_list = await self.config.guild(guild).images()
 
         if image_list == []:
-            await ctx.send("I do not have any images saved!")
+            await ctx.send("I do not have any media saved!")
             return
         post_list = [image_list[i : i + 25] for i in range(0, len(image_list), 25)]
         images = []
@@ -381,7 +382,7 @@ class AddImage(commands.Cog):
         self, ctx: commands.Context, name: str, image_loc: str = "guild", server_id: discord.Guild = None
     ) -> None:
         """
-        Show a saved image and its metadata.
+        Show a saved file and its metadata.
         """
         name = name.lower()
         guild = ctx.guild if server_id is None else self.bot.get_guild(server_id.id)
@@ -636,10 +637,10 @@ class AddImage(commands.Cog):
             try:
                 msg = await self.bot.wait_for("message", check=check, timeout=60)
             except asyncio.TimeoutError:
-                await ctx.send("Image adding timed out.")
+                await ctx.send("Media adding timed out.")
                 break
             if msg.content.lower().strip() == "exit":
-                await ctx.send("Image adding cancelled.")
+                await ctx.send("Media adding cancelled.")
                 break
         return msg
 
@@ -648,9 +649,9 @@ class AddImage(commands.Cog):
     @commands.bot_has_permissions(attach_files=True)
     async def add_image_guild(self, ctx: commands.Context, name: str) -> None:
         """
-        Add an image to direct upload on this server
+        Add media to direct upload on this server
 
-        `name` the command name used to post the image
+        `name` the command name used to post the file
         """
         guild = ctx.message.guild
         name = name.lower()
@@ -658,7 +659,7 @@ class AddImage(commands.Cog):
             msg = name + " is already in the list, try another!"
             return await ctx.send(msg)
         if ctx.message.attachments == []:
-            msg = "Upload an image for me to use! Type `exit` to cancel."
+            msg = "Upload an image or video for me to use! Type `exit` to cancel."
             await ctx.send(msg)
             file_msg = await self.wait_for_image(ctx)
             if not file_msg or not file_msg.attachments:
@@ -686,7 +687,7 @@ class AddImage(commands.Cog):
         new_name: Optional[str] = None,
     ) -> None:
         """
-        Copy a saved image from another server into this one.
+        Copy saved media from another server into this one.
 
         The current server is always the destination. The `transfer` alias copies;
         it does not remove the source image.
@@ -731,9 +732,9 @@ class AddImage(commands.Cog):
     @addimage.command(name="addglobal")
     async def add_image_global(self, ctx: commands.Context, name: str) -> None:
         """
-        Add an image to direct upload globally
+        Add media to direct upload globally
 
-        `name` the command name used to post the image
+        `name` the command name used to post the file
         """
         guild = ctx.message.guild
         name = name.lower()
@@ -742,7 +743,7 @@ class AddImage(commands.Cog):
             msg = name + " is already in the list, try another!"
             return await ctx.send(msg)
         if ctx.message.attachments == []:
-            msg = "Upload an image for me to use! Type `exit` to cancel."
+            msg = "Upload an image or video for me to use! Type `exit` to cancel."
             await ctx.send(msg)
             file_msg = await self.wait_for_image(ctx)
             if not file_msg or not file_msg.attachments:

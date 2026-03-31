@@ -21,7 +21,7 @@ You may be prompted to respond with `I agree` during install.
 
 ### AddImage (`addimage`)
 
-Save images for the bot to upload later, similar to aliases but for attachments. Supports guild-specific images, owner-managed global images, renaming, deletion, and per-guild size limits.
+Save uploaded media for the bot to upload later, similar to aliases but for attachments. Supports guild-specific images and videos, owner-managed global media, renaming, deletion, and per-guild size limits.
 
 ### Commands (`commands`)
 

@@ -54,7 +54,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.cog.get_prefix(message)
 
-    async def test_validate_attachment_rejects_non_images_and_oversized_files(self):
+    async def test_validate_attachment_rejects_non_media_and_oversized_files(self):
         async def max_file_size():
             return 4 * 1024 * 1024
 
@@ -63,16 +63,18 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         bad = types.SimpleNamespace(filename="notes.txt", size=100)
         too_large = types.SimpleNamespace(filename="image.png", size=5 * 1024 * 1024)
         ok = types.SimpleNamespace(filename="image.png", size=100)
+        video = types.SimpleNamespace(filename="clip.mp4", size=100)
 
         self.assertEqual(
             await self.cog.validate_attachment(bad),
-            "That attachment is not a supported image type.",
+            "That attachment is not a supported image or video type.",
         )
         self.assertEqual(
             await self.cog.validate_attachment(too_large),
             "That file is too large. Max allowed size is 4 MB.",
         )
         self.assertIsNone(await self.cog.validate_attachment(ok))
+        self.assertIsNone(await self.cog.validate_attachment(video))
 
     def test_safe_storage_extension_normalizes_filename_suffixes(self):
         self.assertEqual(self.cog._safe_storage_extension("image.png"), ".png")
@@ -109,7 +111,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         result = await self.cog.wait_for_image(ctx)
 
         self.assertEqual(result, exit_message)
-        self.assertEqual(sent, ["Image adding cancelled."])
+        self.assertEqual(sent, ["Media adding cancelled."])
 
     async def test_wait_for_image_reports_timeout(self):
         sent = []
@@ -126,7 +128,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         result = await self.cog.wait_for_image(ctx)
 
         self.assertIsNone(result)
-        self.assertEqual(sent, ["Image adding timed out."])
+        self.assertEqual(sent, ["Media adding timed out."])
 
     async def test_wait_for_image_ignores_non_exact_exit_messages(self):
         sent = []
@@ -298,6 +300,25 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("\\", stored_name)
         self.assertNotIn("..", stored_name)
         self.assertTrue(stored_name.endswith(".png"))
+        self.assertEqual(saved_paths[0], self.data_dir / stored_name)
+
+    async def test_save_image_location_keeps_video_extension(self):
+        saved_paths = []
+
+        async def fake_save(path):
+            saved_paths.append(Path(path))
+
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(id=5),
+            attachments=[types.SimpleNamespace(filename="clip.mp4", save=fake_save)],
+        )
+
+        await self.cog.save_image_location(message, "sample", self.guild)
+
+        images = await self.cog.config.guild(self.guild).images()
+        self.assertEqual(len(images), 1)
+        stored_name = images[0]["file_loc"]
+        self.assertTrue(stored_name.endswith(".mp4"))
         self.assertEqual(saved_paths[0], self.data_dir / stored_name)
 
     async def test_copy_image_location_copies_file_and_resets_count(self):
