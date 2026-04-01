@@ -122,14 +122,15 @@ class GuildAssets(commands.Cog):
     def _hash_bytes(payload: bytes) -> str:
         return sha256(payload).hexdigest()
 
-    async def _existing_emoji_keys(self, session: aiohttp.ClientSession, guild: discord.Guild) -> Set[Tuple[str, str]]:
+    async def _existing_emoji_keys(self, session: aiohttp.ClientSession, guild: discord.Guild) -> Set[Tuple[str, bool, str]]:
         keys = set()
         for emoji in guild.emojis:
             if not hasattr(emoji, "url"):
                 continue
             payload = await self._download_emoji_bytes(session, emoji)
             name = self._sanitize_emoji_name(getattr(emoji, "name", ""), "emoji")
-            keys.add((name, self._hash_bytes(payload)))
+            animated = bool(getattr(emoji, "animated", False))
+            keys.add((name, animated, self._hash_bytes(payload)))
         return keys
 
     async def _existing_sticker_keys(self, session: aiohttp.ClientSession, guild: discord.Guild) -> Set[Tuple[str, str]]:
@@ -226,6 +227,11 @@ class GuildAssets(commands.Cog):
         async with aiohttp.ClientSession() as session:
             existing_emoji_keys = await self._existing_emoji_keys(session, guild)
             existing_sticker_keys = await self._existing_sticker_keys(session, guild)
+            existing_animated_emoji_names = {
+                self._sanitize_emoji_name(getattr(emoji, "name", ""), "emoji")
+                for emoji in guild.emojis
+                if bool(getattr(emoji, "animated", False))
+            }
 
             for emoji in manifest.get("emojis", []):
                 animated = bool(emoji.get("animated"))
@@ -233,9 +239,14 @@ class GuildAssets(commands.Cog):
                 name = self._sanitize_emoji_name(emoji["name"], f"emoji{len(results['added_emojis']) + 1}")
                 image = path.read_bytes()
                 asset_hash = emoji.get("sha256") or self._hash_bytes(image)
-                key = (name, asset_hash)
+                key = (name, animated, asset_hash)
 
                 if key in existing_emoji_keys:
+                    results["skipped_emojis"].append(f"{name} (already exists)")
+                    continue
+                # Discord may expose an existing animated emoji as animated webp even when the
+                # exported asset on disk is gif, which makes a byte hash comparison unreliable.
+                if animated and name in existing_animated_emoji_names:
                     results["skipped_emojis"].append(f"{name} (already exists)")
                     continue
                 if self._remaining_emoji_slots(guild, animated) <= 0:
@@ -249,6 +260,8 @@ class GuildAssets(commands.Cog):
                     reason=f"Imported from guild {manifest.get('guild_id')}",
                 )
                 existing_emoji_keys.add(key)
+                if animated:
+                    existing_animated_emoji_names.add(name)
                 results["added_emojis"].append(name)
                 imported_emoji_count += 1
                 if progress_callback is not None and imported_emoji_count % IMPORT_PROGRESS_EVERY == 0:

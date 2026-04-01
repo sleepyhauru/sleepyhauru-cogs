@@ -194,6 +194,50 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["skipped_emojis"], ["wave (already exists)"])
         self.assertEqual(results["skipped_stickers"], ["hi (already exists)"])
 
+    async def test_import_guild_assets_skips_existing_animated_name_when_cdn_bytes_differ(self):
+        export_dir = self.cog._guild_export_root(778) / "20260330T000000Z"
+        (export_dir / "emojis").mkdir(parents=True)
+        (export_dir / "stickers").mkdir(parents=True)
+        (export_dir / "emojis" / "001_dance.gif").write_bytes(b"exported-gif-bytes")
+        (export_dir / "manifest.json").write_text(
+            """{
+  "guild_id": 778,
+  "emojis": [
+    {"name": "dance", "animated": true, "filename": "emojis/001_dance.gif"}
+  ],
+  "stickers": []
+}""",
+            encoding="utf-8",
+        )
+
+        async def create_custom_emoji(**kwargs):
+            raise AssertionError("duplicate animated emoji should have been skipped")
+
+        guild = types.SimpleNamespace(
+            emojis=[types.SimpleNamespace(name="dance", animated=True, url="https://cdn.test/existing-dance.gif")],
+            emoji_limit=5,
+            stickers=[],
+            sticker_limit=5,
+            create_custom_emoji=create_custom_emoji,
+            create_sticker=None,
+        )
+
+        async def fake_read_url(session, url):
+            if url == "https://cdn.test/existing-dance.gif":
+                raise load_module("aiohttp").ClientError("gif unavailable")
+            if url == "https://cdn.test/existing-dance.webp?animated=true":
+                return b"existing-webp-bytes"
+            raise AssertionError(f"unexpected url: {url}")
+
+        self.cog._read_url = fake_read_url
+
+        results = await self.cog._import_guild_assets(guild, export_dir)
+
+        self.assertEqual(results["added_emojis"], [])
+        self.assertEqual(results["skipped_emojis"], ["dance (already exists)"])
+        self.assertEqual(results["added_stickers"], [])
+        self.assertEqual(results["skipped_stickers"], [])
+
     async def test_import_guild_assets_retries_and_paces_emoji_uploads(self):
         export_dir = self.cog._guild_export_root(888) / "20260330T000000Z"
         (export_dir / "emojis").mkdir(parents=True)
