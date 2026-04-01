@@ -153,6 +153,7 @@ cython_debug/
 
 # Local repo notes
 OVERVIEW.md
+agents.md
 
 # macOS Finder metadata
 .DS_Store
