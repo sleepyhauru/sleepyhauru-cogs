@@ -5,7 +5,7 @@ import aiohttp
 import discord
 from typing import Optional, Union, List, Sequence
 from itertools import zip_longest
-from redbot.core import commands, app_commands
+from redbot.core import Config, commands, app_commands
 
 IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 STICKER_KB = 512
@@ -26,6 +26,7 @@ STICKER_SLOTS = "⚠ This server doesn't have any more space for stickers!"
 EMOJI_FAIL = "❌ Failed to upload"
 EMOJI_SLOTS = "⚠ This server doesn't have any more space for emojis!"
 INVALID_EMOJI = "Invalid emoji or emoji ID."
+UPLOAD_NOT_ALLOWED = "You need Manage Emojis and Stickers or be on the steal upload allowlist."
 STICKER_TOO_BIG = f"Stickers may only be up to {STICKER_KB} KB and {STICKER_DIM}x{STICKER_DIM} pixels and last up to {STICKER_TIME} seconds."
 STICKER_ATTACHMENT = """\
 >>> For a non-moving sticker, simply use this command and attach a PNG image.
@@ -70,6 +71,8 @@ class EmojiSteal(commands.Cog):
     def __init__(self, bot):
         super().__init__()
         self.bot = bot
+        self.config = Config.get_conf(self, identifier=183040004, force_registration=True)
+        self.config.register_guild(upload_allowlist=[])
         self.steal_context_menu = app_commands.ContextMenu(name='Steal Emotes', callback=self.steal_app_command)
         self.steal_upload_context_menu = app_commands.ContextMenu(name='Steal+Upload Emotes', callback=self.steal_upload_app_command)
         self.bot.tree.add_command(self.steal_context_menu)
@@ -138,6 +141,24 @@ class EmojiSteal(commands.Cog):
             png_fp = io.BytesIO(archive.read(info))
             png_fp.seek(0)
             return png_fp
+
+    async def _is_upload_allowed(self, guild: discord.Guild, user) -> bool:
+        permissions = getattr(user, "guild_permissions", None)
+        if getattr(permissions, "manage_emojis", False):
+            return True
+
+        allowlist = await self.config.guild(guild).upload_allowlist()
+        return getattr(user, "id", None) in allowlist
+
+    async def _ensure_upload_allowed(self, destination, guild: discord.Guild, user, *, ephemeral: bool = False) -> bool:
+        if await self._is_upload_allowed(guild, user):
+            return True
+
+        if ephemeral:
+            await destination.send_message(UPLOAD_NOT_ALLOWED, ephemeral=True)
+        else:
+            await destination.send(UPLOAD_NOT_ALLOWED)
+        return False
 
     async def _upload_emojis(
         self,
@@ -271,11 +292,12 @@ class EmojiSteal(commands.Cog):
 
     @steal_command.command(name="upload")
     @commands.guild_only()
-    @commands.has_permissions(manage_emojis=True)
     @commands.bot_has_permissions(manage_emojis=True)
     async def steal_upload_command(self, ctx: commands.Context, *names: str):
         """Steals emojis and stickers you reply to and uploads them to this server."""
         assert ctx.guild
+        if not await self._ensure_upload_allowed(ctx, ctx.guild, ctx.author):
+            return
         if not (emojis_or_stickers := await self.steal_ctx(ctx)):
             return
         final_names = self._sanitize_names(names)
@@ -315,10 +337,11 @@ class EmojiSteal(commands.Cog):
 
     # context menu added in __init__
     @app_commands.guild_only()
-    @app_commands.checks.has_permissions(manage_emojis=True)
     @app_commands.checks.bot_has_permissions(manage_emojis=True)
     async def steal_upload_app_command(self, ctx: discord.Interaction, message: discord.Message):
         assert ctx.guild
+        if not await self._ensure_upload_allowed(ctx.response, ctx.guild, ctx.user, ephemeral=True):
+            return
         if message.stickers:
             emojis_or_stickers = message.stickers
         else:
@@ -353,6 +376,49 @@ class EmojiSteal(commands.Cog):
         await ctx.edit_original_response(content="\n".join(response))
 
 
+    @commands.group(name="stealset", invoke_without_command=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_guild=True)
+    async def stealset(self, ctx: commands.Context):
+        """Manage EmojiSteal settings for this server."""
+        await ctx.send("Use `stealset allowuser`, `stealset denyuser`, or `stealset showallowlist`.")
+
+    @stealset.command(name="allowuser")
+    async def stealset_allowuser(self, ctx: commands.Context, user: Union[discord.Member, discord.User]):
+        """Allow one user to use steal upload without Manage Emojis."""
+        assert ctx.guild
+        allowlist = await self.config.guild(ctx.guild).upload_allowlist()
+        if user.id in allowlist:
+            return await ctx.send(f"{user.mention} is already on the steal upload allowlist.")
+
+        allowlist.append(user.id)
+        await self.config.guild(ctx.guild).upload_allowlist.set(allowlist)
+        await ctx.send(f"Added {user.mention} to the steal upload allowlist.")
+
+    @stealset.command(name="denyuser")
+    async def stealset_denyuser(self, ctx: commands.Context, user: Union[discord.Member, discord.User]):
+        """Remove one user from the steal upload allowlist."""
+        assert ctx.guild
+        allowlist = await self.config.guild(ctx.guild).upload_allowlist()
+        if user.id not in allowlist:
+            return await ctx.send(f"{user.mention} is not on the steal upload allowlist.")
+
+        allowlist.remove(user.id)
+        await self.config.guild(ctx.guild).upload_allowlist.set(allowlist)
+        await ctx.send(f"Removed {user.mention} from the steal upload allowlist.")
+
+    @stealset.command(name="showallowlist")
+    async def stealset_showallowlist(self, ctx: commands.Context):
+        """Show users allowed to bypass the steal upload permission check."""
+        assert ctx.guild
+        allowlist = await self.config.guild(ctx.guild).upload_allowlist()
+        if not allowlist:
+            return await ctx.send("The steal upload allowlist is empty.")
+
+        mentions = ", ".join(f"<@{user_id}>" for user_id in allowlist)
+        await ctx.send(f"Steal upload allowlist: {mentions}")
+
+
     @commands.command()
     async def getemoji(self, ctx: commands.Context, *, emoji: str):
         """Get the image link for custom emojis or an emoji ID."""
@@ -367,13 +433,14 @@ class EmojiSteal(commands.Cog):
         await ctx.send('\n'.join(emoji.url for emoji in emojis))
 
 
-    @commands.has_permissions(manage_emojis=True)
     @commands.bot_has_permissions(manage_emojis=True)
     @commands.guild_only()
     @commands.command()
     async def uploadsticker(self, ctx: commands.Context, *, name: str = None):
         """Uploads a sticker to the server, useful for mobile."""
         assert ctx.guild
+        if not await self._ensure_upload_allowed(ctx, ctx.guild, ctx.author):
+            return
         if len(ctx.guild.stickers) >= ctx.guild.sticker_limit:
             return await ctx.send(content=STICKER_SLOTS)
 

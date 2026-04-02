@@ -40,6 +40,40 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog.available_emoji_slots(guild, False), 4)
         self.assertEqual(self.cog.available_emoji_slots(guild, True), 4)
 
+    async def test_is_upload_allowed_accepts_manage_emojis_permission(self):
+        guild = types.SimpleNamespace(id=1)
+        user = types.SimpleNamespace(
+            id=10,
+            guild_permissions=types.SimpleNamespace(manage_emojis=True),
+        )
+
+        allowed = await self.cog._is_upload_allowed(guild, user)
+
+        self.assertTrue(allowed)
+
+    async def test_is_upload_allowed_accepts_guild_allowlist(self):
+        guild = types.SimpleNamespace(id=2)
+        user = types.SimpleNamespace(
+            id=42,
+            guild_permissions=types.SimpleNamespace(manage_emojis=False),
+        )
+        await self.cog.config.guild(guild).upload_allowlist.set([42])
+
+        allowed = await self.cog._is_upload_allowed(guild, user)
+
+        self.assertTrue(allowed)
+
+    async def test_is_upload_allowed_rejects_user_without_permission_or_allowlist(self):
+        guild = types.SimpleNamespace(id=3)
+        user = types.SimpleNamespace(
+            id=99,
+            guild_permissions=types.SimpleNamespace(manage_emojis=False),
+        )
+
+        allowed = await self.cog._is_upload_allowed(guild, user)
+
+        self.assertFalse(allowed)
+
     async def test_send_steal_info_reports_deduplicated_emoji_counts_and_slots(self):
         sent = []
 
@@ -188,9 +222,12 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
             save=save,
         )
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            guild=types.SimpleNamespace(id=6, stickers=[], sticker_limit=5, create_sticker=create_sticker),
             message=types.SimpleNamespace(attachments=[attachment]),
-            author="tester",
+            author=types.SimpleNamespace(
+                id=60,
+                guild_permissions=types.SimpleNamespace(manage_emojis=True),
+            ),
             send=send,
             typing=typing,
         )
@@ -200,6 +237,49 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["name"], "fun.sticker")
         self.assertEqual(captured["position"], 0)
         self.assertEqual(sent, [f"{emojisteal_module.STICKER_SUCCESS}: fun.sticker"])
+
+    async def test_uploadsticker_rejects_user_without_permission_or_allowlist(self):
+        sent = []
+
+        async def send(content=None):
+            sent.append(content)
+
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=4, stickers=[], sticker_limit=5),
+            message=types.SimpleNamespace(attachments=[]),
+            author=types.SimpleNamespace(
+                id=50,
+                guild_permissions=types.SimpleNamespace(manage_emojis=False),
+            ),
+            send=send,
+        )
+
+        await self.cog.uploadsticker(ctx)
+
+        self.assertEqual(sent, [emojisteal_module.UPLOAD_NOT_ALLOWED])
+
+    async def test_stealset_allowuser_and_denyuser_update_allowlist(self):
+        sent = []
+        guild = types.SimpleNamespace(id=5)
+        user = types.SimpleNamespace(id=77, mention="<@77>")
+
+        async def send(content=None):
+            sent.append(content)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+
+        await self.cog.stealset_allowuser(ctx, user)
+        self.assertEqual(await self.cog.config.guild(guild).upload_allowlist(), [77])
+
+        await self.cog.stealset_denyuser(ctx, user)
+        self.assertEqual(await self.cog.config.guild(guild).upload_allowlist(), [])
+        self.assertEqual(
+            sent,
+            [
+                "Added <@77> to the steal upload allowlist.",
+                "Removed <@77> from the steal upload allowlist.",
+            ],
+        )
 
     async def test_uploadsticker_rejects_non_sticker_attachment_case_insensitively(self):
         sent = []
@@ -214,8 +294,12 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
             height=None,
         )
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(stickers=[], sticker_limit=5),
+            guild=types.SimpleNamespace(id=7, stickers=[], sticker_limit=5),
             message=types.SimpleNamespace(attachments=[attachment]),
+            author=types.SimpleNamespace(
+                id=70,
+                guild_permissions=types.SimpleNamespace(manage_emojis=True),
+            ),
             send=send,
         )
 
@@ -251,9 +335,12 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
             save=save,
         )
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            guild=types.SimpleNamespace(id=8, stickers=[], sticker_limit=5, create_sticker=create_sticker),
             message=types.SimpleNamespace(attachments=[attachment]),
-            author="tester",
+            author=types.SimpleNamespace(
+                id=80,
+                guild_permissions=types.SimpleNamespace(manage_emojis=True),
+            ),
             send=send,
             typing=typing,
         )
@@ -289,9 +376,12 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
             save=save,
         )
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            guild=types.SimpleNamespace(id=9, stickers=[], sticker_limit=5, create_sticker=create_sticker),
             message=types.SimpleNamespace(attachments=[attachment]),
-            author="tester",
+            author=types.SimpleNamespace(
+                id=90,
+                guild_permissions=types.SimpleNamespace(manage_emojis=True),
+            ),
             send=send,
             typing=typing,
         )
@@ -327,9 +417,12 @@ class EmojiStealHelpersTest(unittest.IsolatedAsyncioTestCase):
             save=save,
         )
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(stickers=[], sticker_limit=5, create_sticker=create_sticker),
+            guild=types.SimpleNamespace(id=10, stickers=[], sticker_limit=5, create_sticker=create_sticker),
             message=types.SimpleNamespace(attachments=[attachment]),
-            author="tester",
+            author=types.SimpleNamespace(
+                id=100,
+                guild_permissions=types.SimpleNamespace(manage_emojis=True),
+            ),
             send=send,
             typing=typing,
         )

@@ -31,6 +31,9 @@ def install_stubs():
         class Member:
             pass
 
+        class User:
+            pass
+
         class VoiceState:
             pass
 
@@ -119,6 +122,7 @@ def install_stubs():
         discord.Message = Message
         discord.Attachment = Attachment
         discord.Member = Member
+        discord.User = User
         discord.VoiceState = VoiceState
         discord.Embed = Embed
         discord.SelectOption = SelectOption
