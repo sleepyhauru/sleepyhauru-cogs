@@ -37,21 +37,41 @@ Applies deepfry or nuke filters to static images and GIFs. Supports attachments,
 
 Lets users steal emojis and stickers from replied-to messages, return their asset URLs, or upload them to the current server. Includes Discord context menus, `getemoji`, and mobile-friendly sticker upload flows.
 
+Quick start:
+- Reply to a message with `[p]steal` to get the asset URLs, or `[p]steal info` to preview what would be imported.
+- Use `[p]steal upload` on a reply to import the emoji or sticker into the current server.
+- If you want message context commands, enable them with `[p]slash enablecog emojisteal` and `[p]slash sync`.
+
 ![EmojiSteal example](docs/screenshots/emojisteal.png)
 
 ### GuildAssets (`guildassets`)
 
 Owner-only backup tools for server emojis and stickers. Export a guild's current assets into the bot's data folder, then import the latest export into another server with the same bot.
 
+Quick start:
+- In the source server, run `[p]guildassets export`.
+- Check saved export history with `[p]guildassets list` or `[p]guildassets list <source_guild_id>`.
+- In the destination server, run `[p]guildassets import <source_guild_id>` and optionally pass a timestamp from the export list.
+
 ### Kagi (`kagi`)
 
 Adds Kagi Translate tools, including `translate` (auto-detect to English), `translateinto <language>`, and the `linkedin` / `genz` style rewrites, plus owner-only setup and auth test commands. Custom Discord emoji are normalized before translation so they can be passed to Kagi cleanly.
+
+Quick start:
+- Load the cog, then configure it in DMs with `[p]kagi setkagi <value>` and `[p]kagi settranslate <value>`.
+- Verify the saved auth with `[p]kagi test`, then use `[p]translate`, `[p]translateinto`, `[p]linkedin`, or `[p]genz`.
+- If you want message context commands for translating or rewriting a specific message, enable them with `[p]slash enablecog kagi` and `[p]slash sync`.
 
 ![Kagi example](docs/screenshots/kagi.png)
 
 ### ModLog (`modlog`)
 
 Tracks bans, unbans, kicks, joins, leaves, timeout changes, nickname and role updates, and cached message edits/deletes including bulk deletes, then posts them in a configured mod-log channel.
+
+Quick start:
+- Run `[p]modlog here` in the channel that should receive log entries.
+- Verify the setup with `[p]modlog test`.
+- Adjust audit matching with `[p]modlog auditwindow <seconds>` if moderation actions are being matched too loosely or too late.
 
 ### No Fuck You (`nofuckyou`)
 
