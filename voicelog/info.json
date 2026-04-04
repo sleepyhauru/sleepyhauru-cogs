@@ -1,5 +1,5 @@
 {
-    "author": ["hollowstrawberry"],
+    "author": ["sleepyhauru"],
     "min_bot_version": "3.5.0",
     "min_python_version": [3, 8, 0],
     "description": "Logs users joining, leaving, and moving between voice channels inside the voice channel chat.",

@@ -1,5 +1,5 @@
 {
-    "author": ["sleepyhauru", "Eris"],
+    "author": ["sleepyhauru"],
     "min_bot_version": "3.5.0",
     "description": "Replies with \"No fuck you\" when someone says \"fuck you\", with configurable odds.",
     "hidden": false,
