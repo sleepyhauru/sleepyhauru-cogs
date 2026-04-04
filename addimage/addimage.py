@@ -1,4 +1,6 @@
 import asyncio
+import io
+import math
 import mimetypes
 import os
 import random
@@ -11,7 +13,6 @@ import discord
 from red_commons.logging import getLogger
 from redbot.core import Config, checks, commands
 from redbot.core.data_manager import cog_data_path
-from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 log = getLogger("red.sleepyhauru-cogs.addimage")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -148,6 +149,107 @@ class AddImage(commands.Cog):
 
     async def get_image_path(self, image: dict, guild: Optional[discord.Guild] = None) -> Path:
         return await self.get_directory(guild) / image["file_loc"]
+
+    @staticmethod
+    def _truncate_preview_label(label: str, limit: int = 18) -> str:
+        if len(label) <= limit:
+            return label
+        return f"{label[: limit - 1]}…"
+
+    @staticmethod
+    def _preview_type_label(path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            return "VIDEO"
+        if suffix in IMAGE_EXTENSIONS:
+            return "IMAGE"
+        return "MEDIA"
+
+    async def _build_list_preview_file(
+        self, images: list[dict], guild: Optional[discord.Guild], page_number: int
+    ) -> Optional[discord.File]:
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return None
+
+        tile_width = 168
+        tile_height = 198
+        media_box_size = 136
+        padding = 16
+        columns = min(5, max(1, math.ceil(math.sqrt(len(images)))))
+        rows = math.ceil(len(images) / columns)
+        canvas_width = columns * tile_width + (columns + 1) * padding
+        canvas_height = rows * tile_height + (rows + 1) * padding
+        canvas = Image.new("RGB", (canvas_width, canvas_height), "#111827")
+        draw = ImageDraw.Draw(canvas)
+        font = ImageFont.load_default()
+
+        for index, image in enumerate(images):
+            row, column = divmod(index, columns)
+            left = padding + column * (tile_width + padding)
+            top = padding + row * (tile_height + padding)
+            right = left + tile_width
+            bottom = top + tile_height
+            draw.rectangle((left, top, right, bottom), fill="#1f2937", outline="#374151", width=2)
+
+            media_left = left + (tile_width - media_box_size) // 2
+            media_top = top + 12
+            media_image = self._render_preview_tile(
+                await self.get_image_path(image, guild), size=media_box_size
+            )
+            canvas.paste(media_image, (media_left, media_top))
+
+            label = self._truncate_preview_label(image["command_name"])
+            draw.text((left + 10, top + media_box_size + 24), label, fill="#f9fafb", font=font)
+            draw.text(
+                (left + 10, top + media_box_size + 42),
+                f"uses: {image['count']}",
+                fill="#d1d5db",
+                font=font,
+            )
+
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        buffer.seek(0)
+        return discord.File(buffer, filename=f"addimage-list-page-{page_number}.png")
+
+    def _render_preview_tile(self, path: Path, size: int):
+        from PIL import Image, ImageDraw, ImageFont
+
+        background = Image.new("RGB", (size, size), "#0f172a")
+        draw = ImageDraw.Draw(background)
+        draw.rectangle((0, 0, size - 1, size - 1), outline="#475569", width=2)
+        font = ImageFont.load_default()
+
+        preview_type = self._preview_type_label(path)
+        if path.exists() and path.suffix.lower() in IMAGE_EXTENSIONS:
+            try:
+                with Image.open(path) as opened:
+                    media = opened.convert("RGB")
+                    media.thumbnail((size - 12, size - 12))
+                    left = (size - media.width) // 2
+                    top = (size - media.height) // 2
+                    background.paste(media, (left, top))
+                    return background
+            except Exception:
+                preview_type = "BROKEN"
+        elif not path.exists():
+            preview_type = "MISSING"
+
+        if hasattr(draw, "textbbox"):
+            text_box = draw.textbbox((0, 0), preview_type, font=font)
+            text_width = text_box[2] - text_box[0]
+            text_height = text_box[3] - text_box[1]
+        else:
+            text_width, text_height = draw.textsize(preview_type, font=font)
+        draw.text(
+            ((size - text_width) // 2, (size - text_height) // 2),
+            preview_type,
+            fill="#e5e7eb",
+            font=font,
+        )
+        return background
 
     def _generate_storage_filename(self, original_filename: str) -> str:
         seed = "".join(random.sample(string.ascii_uppercase + string.digits, k=5))
@@ -444,21 +546,28 @@ class AddImage(commands.Cog):
         """
         List images added to bot
         """
+        scope_label = image_loc
         if image_loc in ["global"]:
             image_list = await self.config.images()
+            source_guild = None
+            scope_label = "global"
         elif image_loc in ["guild", "server"]:
             if server_id is None:
                 guild = ctx.message.guild
             else:
                 guild = server_id
             image_list = await self.config.guild(guild).images()
+            source_guild = guild
+            scope_label = f"guild: {guild.name}"
+        else:
+            await ctx.send("Choose either `guild` or `global`.")
+            return
 
         if image_list == []:
             await ctx.send("I do not have any media saved!")
             return
         post_list = [image_list[i : i + 25] for i in range(0, len(image_list), 25)]
-        images = []
-        for post in post_list:
+        for page_number, post in enumerate(post_list, start=1):
             em = discord.Embed(timestamp=ctx.message.created_at)
             for image in post:
                 info = (
@@ -469,11 +578,14 @@ class AddImage(commands.Cog):
                 )
                 em.add_field(name=image["command_name"], value=info)
             em.set_author(name=self.bot.user.display_name, icon_url=self.bot.user.display_avatar)
-            em.set_footer(
-                text="Page " + "{}/{}".format(post_list.index(post) + 1, len(post_list))
-            )
-            images.append(em)
-        await menu(ctx, images, DEFAULT_CONTROLS)
+            em.description = f"Scope: {scope_label}"
+            em.set_footer(text="Page " + "{}/{}".format(page_number, len(post_list)))
+            preview = await self._build_list_preview_file(post, source_guild, page_number)
+            if preview is not None:
+                em.set_image(url=f"attachment://{preview.filename}")
+                await ctx.send(embed=em, file=preview)
+                continue
+            await ctx.send(embed=em)
 
     @addimage.command(name="show")
     async def show_image(

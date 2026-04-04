@@ -45,6 +45,7 @@ def install_stubs():
                 self.timestamp = timestamp
                 self.fields = []
                 self.footer = None
+                self.image = None
 
             def add_field(self, *, name, value):
                 self.fields.append(types.SimpleNamespace(name=name, value=value))
@@ -55,14 +56,18 @@ def install_stubs():
             def set_author(self, **kwargs):
                 self.author = kwargs
 
+            def set_image(self, *, url):
+                self.image = url
+
         class SelectOption:
             def __init__(self, label, value):
                 self.label = label
                 self.value = value
 
         class File:
-            def __init__(self, fp):
+            def __init__(self, fp, filename=None):
                 self.fp = fp
+                self.filename = filename
 
         class Emoji:
             pass

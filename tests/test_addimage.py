@@ -265,10 +265,16 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, ["Renamed `oldname` to `newname`."])
 
     async def test_listimages_uses_passed_guild_object(self):
-        captured_pages = []
+        sent = []
 
-        async def fake_menu(ctx, pages, controls):
-            captured_pages.extend(pages)
+        async def fake_send(*, embed=None, file=None):
+            sent.append((embed, file))
+
+        async def fake_preview(images, guild, page_number):
+            self.assertEqual(page_number, 1)
+            self.assertIs(guild, self.guild)
+            self.assertEqual(images[0]["command_name"], "guildimg")
+            return types.SimpleNamespace(filename="addimage-list-page-1.png")
 
         self.cog.bot.get_guild = lambda guild_id: (_ for _ in ()).throw(
             AssertionError("get_guild should not be called with a converted guild")
@@ -277,19 +283,22 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
             [{"command_name": "guildimg", "count": 2, "author": 1, "file_loc": "x.png"}]
         )
 
-        original_menu = addimage_module.menu
-        addimage_module.menu = fake_menu
+        original_preview = self.cog._build_list_preview_file
+        self.cog._build_list_preview_file = fake_preview
         try:
             ctx = types.SimpleNamespace(
                 message=types.SimpleNamespace(guild=None, created_at=None),
-                send=lambda *args, **kwargs: None,
+                send=fake_send,
             )
             await self.cog.listimages(ctx, "guild", self.guild)
         finally:
-            addimage_module.menu = original_menu
+            self.cog._build_list_preview_file = original_preview
 
-        self.assertEqual(len(captured_pages), 1)
-        self.assertEqual(captured_pages[0].fields[0].name, "guildimg")
+        self.assertEqual(len(sent), 1)
+        embed, file = sent[0]
+        self.assertEqual(embed.fields[0].name, "guildimg")
+        self.assertEqual(embed.image, "attachment://addimage-list-page-1.png")
+        self.assertEqual(file.filename, "addimage-list-page-1.png")
 
     async def test_clear_images_handles_missing_guild_folder(self):
         ticked = []
