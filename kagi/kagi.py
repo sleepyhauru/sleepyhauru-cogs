@@ -5,7 +5,7 @@ from typing import Optional
 
 import aiohttp
 import discord
-from redbot.core import Config, commands
+from redbot.core import Config, app_commands, commands
 
 
 class Kagi(commands.Cog):
@@ -60,7 +60,8 @@ class Kagi(commands.Cog):
         "linkedin": {
             "target_lang": "linkedin",
             "missing_text_message": (
-                "Provide text after `!linkedin` or reply to a message with `!linkedin`."
+                "Provide text with `linkedin`, reply to a message before running it, "
+                "or use the `LinkedIn Rewrite` message command."
             ),
             "rng_prompts": [
                 "Rewrite this in corporate LinkedIn tone.",
@@ -71,7 +72,10 @@ class Kagi(commands.Cog):
         },
         "genz": {
             "target_lang": "gen_z",
-            "missing_text_message": "Provide text after `!genz` or reply to a message with `!genz`.",
+            "missing_text_message": (
+                "Provide text with `genz`, reply to a message before running it, "
+                "or use the `Gen Z Rewrite` message command."
+            ),
             "rng_prompts": [
                 "Rewrite this in casual Gen Z style.",
                 "Rewrite this in exaggerated Gen Z slang.",
@@ -95,6 +99,19 @@ class Kagi(commands.Cog):
             "For safety, send this command to me in DMs instead of a server channel."
         )
         self.session = None
+        self.translate_context_menu = app_commands.ContextMenu(
+            name="Translate to English",
+            callback=self.translate_message_app_command,
+        )
+        self.linkedin_context_menu = app_commands.ContextMenu(
+            name="LinkedIn Rewrite",
+            callback=self.linkedin_message_app_command,
+        )
+        self.genz_context_menu = app_commands.ContextMenu(
+            name="Gen Z Rewrite",
+            callback=self.genz_message_app_command,
+        )
+        self._register_context_menus()
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         base = super().format_help_for_context(ctx)
@@ -104,13 +121,65 @@ class Kagi(commands.Cog):
         return
 
     def cog_unload(self):
+        self._unregister_context_menus()
         if self.session is not None and not getattr(self.session, "closed", False):
-            self.bot.loop.create_task(self.session.close())
+            loop = getattr(self.bot, "loop", None)
+            if loop is not None:
+                loop.create_task(self.session.close())
+
+    def _register_context_menus(self) -> None:
+        tree = getattr(self.bot, "tree", None)
+        if tree is None:
+            return
+        for command in (
+            self.translate_context_menu,
+            self.linkedin_context_menu,
+            self.genz_context_menu,
+        ):
+            tree.add_command(command)
+
+    def _unregister_context_menus(self) -> None:
+        tree = getattr(self.bot, "tree", None)
+        if tree is None:
+            return
+        for command in (
+            self.translate_context_menu,
+            self.linkedin_context_menu,
+            self.genz_context_menu,
+        ):
+            tree.remove_command(command.name, type=command.type)
 
     async def _get_auth(self) -> tuple[str, str]:
         kagi_session = await self.config.kagi_session()
         translate_session = await self.config.translate_session()
         return kagi_session.strip(), translate_session.strip()
+
+    @staticmethod
+    def _prefix(ctx: commands.Context) -> str:
+        return getattr(ctx, "clean_prefix", "[p]")
+
+    def _owner_setup_message(self, prefix: str) -> str:
+        return (
+            "Kagi auth is not configured. Use the owner setup commands first:\n"
+            f"`{prefix}kagi setkagi <value>`\n"
+            f"`{prefix}kagi settranslate <value>`"
+        )
+
+    async def _config_status_message(self, prefix: str) -> str:
+        kagi_session, translate_session = await self._get_auth()
+        model = await self.config.model()
+        next_step = (
+            f"Next: `{prefix}kagi test`"
+            if kagi_session and translate_session
+            else f"Next: configure in DMs with `{prefix}kagi setkagi <value>` and `{prefix}kagi settranslate <value>`."
+        )
+        return (
+            "Kagi configuration\n"
+            f"Configured `kagi_session`: `{'yes' if kagi_session else 'no'}`\n"
+            f"Configured `translate_session`: `{'yes' if translate_session else 'no'}`\n"
+            f"Model: `{model}`\n"
+            f"{next_step}"
+        )
 
     async def _require_dm_config(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -328,6 +397,145 @@ class Kagi(commands.Cog):
             chunk = output[start : start + self.MAX_MESSAGE_LENGTH]
             await ctx.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _send_interaction_message(
+        self,
+        interaction: discord.Interaction,
+        message: str,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        kwargs = {
+            "allowed_mentions": discord.AllowedMentions.none(),
+            "ephemeral": ephemeral,
+        }
+        response = getattr(interaction, "response", None)
+        is_done = getattr(response, "is_done", None)
+        if response is not None and callable(is_done) and not is_done():
+            await response.send_message(message, **kwargs)
+            return
+
+        followup = getattr(interaction, "followup", None)
+        if followup is not None:
+            await followup.send(message, **kwargs)
+
+    async def _send_interaction_output(
+        self,
+        interaction: discord.Interaction,
+        output: str,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        chunks = [
+            output[start : start + self.MAX_MESSAGE_LENGTH]
+            for start in range(0, len(output), self.MAX_MESSAGE_LENGTH)
+        ]
+        if not chunks:
+            chunks = [""]
+
+        for index, chunk in enumerate(chunks):
+            await self._send_interaction_message(
+                interaction,
+                chunk,
+                ephemeral=ephemeral if index == 0 else ephemeral,
+            )
+
+    async def _run_style_for_message(self, message: discord.Message, mode_key: str) -> str:
+        target = self._extract_message_text(message)
+        if not target:
+            raise ValueError("That message doesn't have any text I can rewrite.")
+
+        target = self._normalize_custom_emoji_text(target)
+        if len(target) > 4000:
+            raise ValueError("That message is too long to rewrite.")
+
+        prompt = self._choose_style_prompt(mode_key)
+        output = await self._translate(
+            target,
+            self.STYLE_CONFIGS[mode_key]["target_lang"],
+            context=self._build_style_context(prompt),
+        )
+        return self._strip_echoed_prompt(output, prompt)
+
+    async def _run_translate_for_message(
+        self,
+        message: discord.Message,
+        *,
+        to_lang: str,
+        from_lang: str = "auto",
+    ) -> str:
+        target = self._extract_message_text(message)
+        if not target:
+            raise ValueError("That message doesn't have any text I can translate.")
+
+        target = self._normalize_custom_emoji_text(target)
+        if len(target) > 4000:
+            raise ValueError("That message is too long to translate.")
+
+        return await self._translate(target, to_lang, from_lang=from_lang)
+
+    async def _message_context_translate(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+        *,
+        to_lang: str,
+        from_lang: str = "auto",
+    ) -> None:
+        prefix = self._prefix(interaction)
+        kagi_session, translate_session = await self._get_auth()
+        if not kagi_session or not translate_session:
+            await self._send_interaction_message(
+                interaction,
+                self._owner_setup_message(prefix),
+                ephemeral=True,
+            )
+            return
+
+        response = getattr(interaction, "response", None)
+        if response is not None and hasattr(response, "defer"):
+            await response.defer(thinking=True)
+
+        try:
+            output = await self._run_translate_for_message(
+                message,
+                to_lang=to_lang,
+                from_lang=from_lang,
+            )
+        except Exception as error:
+            await self._send_interaction_message(interaction, f"Error: {error}", ephemeral=True)
+            return
+
+        await self._send_interaction_output(interaction, output)
+
+    async def _message_context_style(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+        *,
+        mode_key: str,
+    ) -> None:
+        prefix = self._prefix(interaction)
+        kagi_session, translate_session = await self._get_auth()
+        if not kagi_session or not translate_session:
+            await self._send_interaction_message(
+                interaction,
+                self._owner_setup_message(prefix),
+                ephemeral=True,
+            )
+            return
+
+        response = getattr(interaction, "response", None)
+        if response is not None and hasattr(response, "defer"):
+            await response.defer(thinking=True)
+
+        try:
+            output = await self._run_style_for_message(message, mode_key)
+        except Exception as error:
+            await self._send_interaction_message(interaction, f"Error: {error}", ephemeral=True)
+            return
+
+        await self._send_interaction_output(interaction, output)
+
     async def _get_text(self, ctx: commands.Context, text: Optional[str]) -> Optional[str]:
         if text and text.strip():
             return text.strip()
@@ -354,11 +562,7 @@ class Kagi(commands.Cog):
         config = self.STYLE_CONFIGS[mode_key]
 
         if not kagi_session or not translate_session:
-            await ctx.send(
-                "Kagi auth is not configured. Use the owner setup commands first:\n"
-                "`!kagi setkagi <value>`\n"
-                "`!kagi settranslate <value>`"
-            )
+            await ctx.send(self._owner_setup_message(self._prefix(ctx)))
             return
 
         target = await self._get_text(ctx, text)
@@ -396,11 +600,7 @@ class Kagi(commands.Cog):
         kagi_session, translate_session = await self._get_auth()
 
         if not kagi_session or not translate_session:
-            await ctx.send(
-                "Kagi auth is not configured. Use the owner setup commands first:\n"
-                "`!kagi setkagi <value>`\n"
-                "`!kagi settranslate <value>`"
-            )
+            await ctx.send(self._owner_setup_message(self._prefix(ctx)))
             return
 
         target = await self._get_text(ctx, text)
@@ -438,7 +638,7 @@ class Kagi(commands.Cog):
     @commands.is_owner()
     async def kagi(self, ctx: commands.Context):
         """Configure the Kagi cog."""
-        await ctx.send_help()
+        await ctx.send(await self._config_status_message(self._prefix(ctx)))
 
     @kagi.command(name="setkagi")
     @commands.is_owner()
@@ -469,15 +669,7 @@ class Kagi(commands.Cog):
     @commands.is_owner()
     async def show_config(self, ctx: commands.Context):
         """Show whether the required auth values are configured."""
-        kagi_session, translate_session = await self._get_auth()
-        model = await self.config.model()
-
-        msg = (
-            f"**Configured:**\n"
-            f"- `kagi_session`: {'set' if kagi_session else 'missing'}\n"
-            f"- `translate_session`: {'set' if translate_session else 'missing'}\n"
-            f"- `model`: `{model}`"
-        )
+        msg = await self._config_status_message(self._prefix(ctx))
         await self._send_owner_dm(ctx, msg)
 
     @kagi.command(name="clear")
@@ -510,7 +702,9 @@ class Kagi(commands.Cog):
         """Validate the stored Kagi auth values."""
         kagi_session, translate_session = await self._get_auth()
         if not kagi_session or not translate_session:
-            await ctx.send("Kagi auth is incomplete. Use `kagi show` to inspect current config state.")
+            await ctx.send(
+                f"Kagi auth is incomplete. Use `{self._prefix(ctx)}kagi show` to inspect current config state."
+            )
             return
 
         async with ctx.typing():
@@ -528,9 +722,8 @@ class Kagi(commands.Cog):
         """
         Rewrite text into LinkedIn Speak.
 
-        Usage:
-        - !linkedin some text here
-        - reply to a message with !linkedin
+        Pass text directly, reply to a message before running it,
+        or use the `LinkedIn Rewrite` message command.
         """
         await self._run_style_command(
             ctx=ctx,
@@ -544,9 +737,8 @@ class Kagi(commands.Cog):
         """
         Rewrite text into Gen Z style.
 
-        Usage:
-        - !genz some text here
-        - reply to a message with !genz
+        Pass text directly, reply to a message before running it,
+        or use the `Gen Z Rewrite` message command.
         """
         await self._run_style_command(
             ctx=ctx,
@@ -560,9 +752,8 @@ class Kagi(commands.Cog):
         """
         Translate text with automatic language detection into English.
 
-        Usage:
-        - !translate some text here
-        - reply to a message with !translate
+        Pass text directly, reply to a message before running it,
+        or use the `Translate to English` message command.
         """
         await self._run_translate_command(
             ctx,
@@ -570,7 +761,8 @@ class Kagi(commands.Cog):
             to_lang="en",
             from_lang="auto",
             missing_text_message=(
-                "Provide text after `!translate` or reply to a message with `!translate`."
+                "Provide text with `translate`, reply to a message before running it, "
+                "or use the `Translate to English` message command."
             ),
         )
 
@@ -582,10 +774,7 @@ class Kagi(commands.Cog):
         """
         Translate text with automatic language detection into a chosen language.
 
-        Usage:
-        - !translateinto spanish some text here
-        - !translateinto ja some text here
-        - reply to a message with !translateinto french
+        Pass text directly or reply to a message before running it.
         """
         await self._run_translate_command(
             ctx,
@@ -593,6 +782,30 @@ class Kagi(commands.Cog):
             to_lang=target_language,
             from_lang="auto",
             missing_text_message=(
-                "Provide text after `!translateinto <language>` or reply with that command."
+                "Provide text with `translateinto <language>` or reply to a message before running it."
             ),
         )
+
+    @app_commands.guild_only()
+    async def translate_message_app_command(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+    ):
+        await self._message_context_translate(interaction, message, to_lang="en")
+
+    @app_commands.guild_only()
+    async def linkedin_message_app_command(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+    ):
+        await self._message_context_style(interaction, message, mode_key="linkedin")
+
+    @app_commands.guild_only()
+    async def genz_message_app_command(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+    ):
+        await self._message_context_style(interaction, message, mode_key="genz")

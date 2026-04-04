@@ -171,6 +171,7 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("Kagi auth is not configured.", sent[0][0])
+        self.assertIn("[p]kagi setkagi <value>", sent[0][0])
 
     async def test_run_style_command_uses_rng_prompt_and_sends_output(self):
         sent = []
@@ -414,14 +415,15 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
                     "bonjour",
                     "en",
                     "auto",
-                    "Provide text after `!translate` or reply to a message with `!translate`.",
+                    "Provide text with `translate`, reply to a message before running it, "
+                    "or use the `Translate to English` message command.",
                 ),
                 (
                     ctx,
                     "hello",
                     "spanish",
                     "auto",
-                    "Provide text after `!translateinto <language>` or reply with that command.",
+                    "Provide text with `translateinto <language>` or reply to a message before running it.",
                 ),
             ],
         )
@@ -454,8 +456,9 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
         await self.cog.clear_config(ctx, target="weird")
 
         self.assertEqual(sent[0], "Saved model: `turbo`")
-        self.assertIn("- `kagi_session`: set", dms[0])
-        self.assertIn("- `translate_session`: missing", dms[0])
+        self.assertIn("Configured `kagi_session`: `yes`", dms[0])
+        self.assertIn("Configured `translate_session`: `no`", dms[0])
+        self.assertIn("Next: configure in DMs", dms[0])
         self.assertEqual(sent[1], "Cleared `translate_session`.")
         self.assertEqual(sent[2], "Use `all`, `kagi`, or `translate`.")
 
@@ -479,10 +482,103 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_config_status_message_uses_prefix_and_next_step(self):
+        await self.cog.config.kagi_session.set("token")
+        await self.cog.config.translate_session.set("translate")
+        await self.cog.config.model.set("standard")
+
+        message = await self.cog._config_status_message("!")
+
+        self.assertIn("Configured `kagi_session`: `yes`", message)
+        self.assertIn("Configured `translate_session`: `yes`", message)
+        self.assertIn("Next: `!kagi test`", message)
+
+    async def test_kagi_group_sends_status_summary(self):
+        sent = []
+        ctx = types.SimpleNamespace(
+            clean_prefix="?",
+            send=self._async_collector(sent),
+        )
+
+        await self.cog.kagi(ctx)
+
+        self.assertIn("Kagi configuration", sent[0])
+        self.assertIn("Next: configure in DMs with `?kagi setkagi <value>`", sent[0])
+
+    async def test_context_menu_translation_defers_and_sends_output(self):
+        sent = []
+        deferred = []
+
+        async def fake_get_auth():
+            return "kagi-cookie", "translate-cookie"
+
+        async def fake_translate(text, to_lang, context="", from_lang="auto"):
+            self.assertEqual(text, "hola")
+            self.assertEqual(to_lang, "en")
+            self.assertEqual(from_lang, "auto")
+            return "hello"
+
+        self.cog._get_auth = fake_get_auth
+        self.cog._translate = fake_translate
+        interaction = self._interaction(sent=sent, deferred=deferred)
+        message = discord.Message(content="hola")
+
+        await self.cog.translate_message_app_command(interaction, message)
+
+        self.assertEqual(deferred, [True])
+        self.assertEqual(
+            sent,
+            [("hello", {"allowed_mentions": "none", "ephemeral": False})],
+        )
+
+    async def test_context_menu_style_reports_missing_auth_ephemerally(self):
+        sent = []
+        interaction = self._interaction(sent=sent, deferred=[])
+        message = discord.Message(content="post this")
+
+        await self.cog.linkedin_message_app_command(interaction, message)
+
+        self.assertIn("Kagi auth is not configured.", sent[0][0])
+        self.assertTrue(sent[0][1]["ephemeral"])
+
+    async def test_context_menu_registration_and_unload_use_tree(self):
+        added = []
+        removed = []
+
+        class FakeTree:
+            def add_command(self, command):
+                added.append(command.name)
+
+            def remove_command(self, name, type=None):
+                removed.append((name, type))
+
+        cog = kagi_module.Kagi(bot=types.SimpleNamespace(tree=FakeTree()))
+        cog.cog_unload()
+
+        self.assertEqual(
+            added,
+            ["Translate to English", "LinkedIn Rewrite", "Gen Z Rewrite"],
+        )
+        self.assertEqual(
+            removed,
+            [
+                ("Translate to English", "context_menu"),
+                ("LinkedIn Rewrite", "context_menu"),
+                ("Gen Z Rewrite", "context_menu"),
+            ],
+        )
+
     @staticmethod
     def _async_return(value):
         async def inner(*args, **kwargs):
             return value
+
+        return inner
+
+    @staticmethod
+    def _async_collector(target):
+        async def inner(message, **kwargs):
+            target.append(message)
 
         return inner
 
@@ -496,6 +592,32 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
                 return False
 
         return TypingContext()
+
+    @staticmethod
+    def _interaction(*, sent, deferred):
+        class Response:
+            def __init__(self):
+                self.done = False
+
+            def is_done(self):
+                return self.done
+
+            async def send_message(self, message, **kwargs):
+                self.done = True
+                sent.append((message, kwargs))
+
+            async def defer(self, **kwargs):
+                self.done = True
+                deferred.append(True)
+
+        class Followup:
+            async def send(self, message, **kwargs):
+                sent.append((message, kwargs))
+
+        return types.SimpleNamespace(
+            response=Response(),
+            followup=Followup(),
+        )
 
 
 if __name__ == "__main__":

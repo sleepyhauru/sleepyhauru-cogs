@@ -1,10 +1,16 @@
 {
-    "name": "kagi",
+    "name": "Kagi",
     "author": ["sleepyhauru"],
-    "description": "Kagi Translate integration with generic translate commands plus LinkedIn and Gen Z style rewrites.",
-    "install_msg": "Use !kagi to configure your Kagi session tokens. For safety, run setkagi/settranslate in DMs.",
-    "short": "Kagi translate tools",
-    "tags": ["kagi", "translate", "linkedin", "fun"],
+    "description": "Kagi Translate integration with translate and rewrite commands plus message context tools for message-based translation and style rewrites.",
+    "hidden": false,
+    "disabled": false,
+    "install_msg": "Load it with `[p]load kagi`. Configure it in DMs with `[p]kagi setkagi <value>` and `[p]kagi settranslate <value>`, then verify with `[p]kagi test`. To enable the message context commands, run `[p]slash enablecog kagi` and `[p]slash sync`.",
+    "required_cogs": {},
     "requirements": [],
-    "hidden": false
+    "short": "Kagi translate and rewrite tools.",
+    "end_user_data_statement": "This cog stores bot owner-provided Kagi session values and model configuration. It does not store user-submitted translation text.",
+    "tags": ["kagi", "translate", "rewrite", "context-menu"],
+    "type": "COG",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0]
 }
