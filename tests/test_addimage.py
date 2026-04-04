@@ -30,6 +30,13 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         addimage_module.cog_data_path = self.original_cog_data_path
         shutil.rmtree(self.tmp_root, ignore_errors=True)
 
+    @staticmethod
+    def _author(user_id=1, *, manage_channels=False):
+        return types.SimpleNamespace(
+            id=user_id,
+            guild_permissions=types.SimpleNamespace(manage_channels=manage_channels),
+        )
+
     async def test_first_word_lowercases_first_token(self):
         self.assertEqual(await self.cog.first_word("Hello There Friend"), "hello")
 
@@ -172,7 +179,11 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         async def send(message):
             sent.append(message)
 
-        ctx = types.SimpleNamespace(guild=self.guild, send=send)
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            author=self._author(manage_channels=True),
+            send=send,
+        )
 
         await self.cog.ignore_global_commands(ctx)
         await self.cog.ignore_global_commands(ctx)
@@ -181,6 +192,56 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
             sent,
             ["Ignoring bot owner global images.", "Bot owner global images enabled."],
         )
+
+    async def test_allowlist_management_updates_user_ids(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        ctx = types.SimpleNamespace(guild=self.guild, send=send)
+
+        await self.cog.allow_user(ctx, 42)
+        await self.cog.allow_user(ctx, 42)
+        await self.cog.show_allowlist(ctx)
+        await self.cog.deny_user(ctx, 42)
+        await self.cog.deny_user(ctx, 42)
+
+        self.assertEqual(sent[0], "Added `42` to the AddImage allowlist.")
+        self.assertEqual(sent[1], "`42` is already on the AddImage allowlist.")
+        self.assertIn("<@42> (`42`)", sent[2])
+        self.assertEqual(sent[3], "Removed `42` from the AddImage allowlist.")
+        self.assertEqual(sent[4], "`42` is not on the AddImage allowlist.")
+
+    async def test_allowlisted_user_can_bypass_manage_channels(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        author = self._author(user_id=99, manage_channels=False)
+        ctx = types.SimpleNamespace(guild=self.guild, author=author, send=send)
+        await self.cog.config.guild(self.guild).manage_channels_allowlist.set([99])
+
+        await self.cog.ignore_global_commands(ctx)
+
+        self.assertEqual(sent, ["Ignoring bot owner global images."])
+
+    async def test_non_allowlisted_user_without_manage_channels_is_denied(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            author=self._author(user_id=55, manage_channels=False),
+            send=send,
+        )
+
+        await self.cog.ignore_global_commands(ctx)
+
+        self.assertEqual(sent, [addimage_module.ALLOWLIST_DENIED_MESSAGE])
 
     async def test_rename_image_updates_matching_entry(self):
         sent = []
@@ -191,7 +252,11 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         await self.cog.config.guild(self.guild).images.set(
             [{"command_name": "oldname", "count": 0, "file_loc": "x.png", "author": 1}]
         )
-        ctx = types.SimpleNamespace(guild=self.guild, send=send)
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            author=self._author(manage_channels=True),
+            send=send,
+        )
 
         await self.cog.rename_image(ctx, "oldname", "newname")
 
@@ -236,7 +301,12 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
             [{"command_name": "guildimg", "count": 0, "author": 1, "file_loc": "x.png"}]
         )
         shutil.rmtree(self.data_dir, ignore_errors=True)
-        ctx = types.SimpleNamespace(guild=self.guild, tick=tick)
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            author=self._author(manage_channels=True),
+            tick=tick,
+            send=lambda *args, **kwargs: None,
+        )
 
         await self.cog.clear_images(ctx)
 
@@ -274,7 +344,12 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
             [{"command_name": "guildimg", "count": 0, "author": 1, "file_loc": "x.png"}]
         )
         shutil.rmtree(self.data_dir, ignore_errors=True)
-        ctx = types.SimpleNamespace(guild=self.guild, tick=tick)
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            author=self._author(manage_channels=True),
+            tick=tick,
+            send=lambda *args, **kwargs: None,
+        )
 
         await self.cog.clean_deleted_images(ctx)
 
@@ -290,6 +365,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.cog.validate_attachment = lambda attachment: asyncio.sleep(0, result="bad file")
         ctx = types.SimpleNamespace(
             guild=self.guild,
+            author=self._author(manage_channels=True),
             message=types.SimpleNamespace(
                 guild=self.guild,
                 attachments=[types.SimpleNamespace(filename="image.png", size=100)],
@@ -383,7 +459,11 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
             called.append((image, source, destination, new_name))
 
         self.cog.copy_image_location = fake_copy
-        ctx = types.SimpleNamespace(guild=destination_guild, send=send)
+        ctx = types.SimpleNamespace(
+            guild=destination_guild,
+            author=self._author(manage_channels=True),
+            send=send,
+        )
 
         await self.cog.copy_image_guild(ctx, source_guild, "cat")
 
@@ -409,7 +489,11 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
             raise FileNotFoundError("origin.png")
 
         self.cog.copy_image_location = fake_copy
-        ctx = types.SimpleNamespace(guild=destination_guild, send=send)
+        ctx = types.SimpleNamespace(
+            guild=destination_guild,
+            author=self._author(manage_channels=True),
+            send=send,
+        )
 
         await self.cog.copy_image_guild(ctx, source_guild, "cat")
 

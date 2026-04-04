@@ -17,6 +17,7 @@ log = getLogger("red.sleepyhauru-cogs.addimage")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v"}
 DEFAULT_MAX_FILE_SIZE = 8 * 1024 * 1024
+ALLOWLIST_DENIED_MESSAGE = "You need Manage Channels or be on the AddImage allowlist."
 
 
 class AddImage(commands.Cog):
@@ -32,7 +33,11 @@ class AddImage(commands.Cog):
         temp_folder = cog_data_path(self) / "global"
         temp_folder.mkdir(exist_ok=True, parents=True)
         default_global = {"images": [], "max_file_size": DEFAULT_MAX_FILE_SIZE}
-        default_guild = {"images": [], "ignore_global": False}
+        default_guild = {
+            "images": [],
+            "ignore_global": False,
+            "manage_channels_allowlist": [],
+        }
         self.config = Config.get_conf(self, 16446735546)
         self.config.register_global(**default_global)
         self.config.register_guild(**default_guild)
@@ -303,15 +308,48 @@ class AddImage(commands.Cog):
     async def _summary_message(self, guild: discord.Guild, prefix: str) -> str:
         guild_images = await self.config.guild(guild).images()
         global_images = await self.config.images()
-        ignore_global = await self.config.guild(guild).ignore_global()
+        conf = self.config.guild(guild)
+        ignore_global = await conf.ignore_global()
+        allowlist = await conf.manage_channels_allowlist()
         global_summary = "ignored in this server" if ignore_global else str(len(global_images))
         return (
             "AddImage\n"
             f"Guild media saved: `{len(guild_images)}`\n"
             f"Global media available: `{global_summary}`\n"
             f"Ignore global media: `{ignore_global}`\n"
+            f"Permission bypass allowlist: `{len(allowlist)}` user(s)\n"
             f"Next: run `{prefix}addimage add <name>` to save media, or `{prefix}addimage list` to browse it."
         )
+
+    async def _can_manage_addimage(self, ctx: commands.Context) -> bool:
+        author = getattr(ctx, "author", None)
+        guild = getattr(ctx, "guild", None)
+        if author is None or guild is None:
+            return False
+
+        is_owner = getattr(self.bot, "is_owner", None)
+        if is_owner is not None:
+            try:
+                owner_result = is_owner(author)
+                if hasattr(owner_result, "__await__"):
+                    owner_result = await owner_result
+                if owner_result:
+                    return True
+            except Exception:
+                pass
+
+        permissions = getattr(author, "guild_permissions", None)
+        if getattr(permissions, "manage_channels", False):
+            return True
+
+        allowlist = await self.config.guild(guild).manage_channels_allowlist()
+        return getattr(author, "id", None) in allowlist
+
+    async def _ensure_can_manage_addimage(self, ctx: commands.Context) -> bool:
+        if await self._can_manage_addimage(ctx):
+            return True
+        await ctx.send(ALLOWLIST_DENIED_MESSAGE)
+        return False
 
     @commands.group(invoke_without_command=True)
     @commands.guild_only()
@@ -344,17 +382,59 @@ class AddImage(commands.Cog):
         await ctx.tick()
 
     @addimage.command(name="ignoreglobal")
-    @checks.mod_or_permissions(manage_channels=True)
     async def ignore_global_commands(self, ctx: commands.Context) -> None:
         """
         Toggle usage of bot owner set global images on this server
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         ignore_global = await self.config.guild(ctx.guild).ignore_global()
         await self.config.guild(ctx.guild).ignore_global.set(not ignore_global)
         if ignore_global:
             await ctx.send("Bot owner global images enabled.")
         else:
             await ctx.send("Ignoring bot owner global images.")
+
+    @addimage.command(name="allowuser")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def allow_user(self, ctx: commands.Context, user_id: int) -> None:
+        """Allow one Discord user ID to bypass the AddImage Manage Channels check."""
+        assert ctx.guild is not None
+        allowlist = await self.config.guild(ctx.guild).manage_channels_allowlist()
+        if user_id in allowlist:
+            await ctx.send(f"`{user_id}` is already on the AddImage allowlist.")
+            return
+
+        allowlist.append(user_id)
+        await self.config.guild(ctx.guild).manage_channels_allowlist.set(allowlist)
+        await ctx.send(f"Added `{user_id}` to the AddImage allowlist.")
+
+    @addimage.command(name="denyuser")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def deny_user(self, ctx: commands.Context, user_id: int) -> None:
+        """Remove one Discord user ID from the AddImage allowlist."""
+        assert ctx.guild is not None
+        allowlist = await self.config.guild(ctx.guild).manage_channels_allowlist()
+        if user_id not in allowlist:
+            await ctx.send(f"`{user_id}` is not on the AddImage allowlist.")
+            return
+
+        allowlist.remove(user_id)
+        await self.config.guild(ctx.guild).manage_channels_allowlist.set(allowlist)
+        await ctx.send(f"Removed `{user_id}` from the AddImage allowlist.")
+
+    @addimage.command(name="showallowlist")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def show_allowlist(self, ctx: commands.Context) -> None:
+        """Show Discord user IDs allowed to bypass the AddImage Manage Channels check."""
+        assert ctx.guild is not None
+        allowlist = await self.config.guild(ctx.guild).manage_channels_allowlist()
+        if not allowlist:
+            await ctx.send("The AddImage allowlist is empty.")
+            return
+
+        entries = ", ".join(f"<@{user_id}> (`{user_id}`)" for user_id in allowlist)
+        await ctx.send(f"AddImage allowlist: {entries}")
 
     @addimage.command(name="list")
     @commands.bot_has_permissions(embed_links=True)
@@ -444,11 +524,12 @@ class AddImage(commands.Cog):
                 log.error("Error deleting image {image}".format(image=file), exc_info=True)
 
     @addimage.command()
-    @checks.mod_or_permissions(manage_channels=True)
     async def clear_images(self, ctx: commands.Context) -> None:
         """
         Clear all the images stored for the current server
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         await self.config.guild(ctx.guild).images.set([])
         directory = await self.get_directory(ctx.guild)
         for file in await self.get_saved_filenames(ctx.guild):
@@ -459,11 +540,12 @@ class AddImage(commands.Cog):
         await ctx.tick()
 
     @addimage.command()
-    @checks.mod_or_permissions(manage_channels=True)
     async def clean_deleted_images(self, ctx: commands.Context) -> None:
         """
         Cleanup deleted images that are not supposed to be saved anymore
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         images = await self.config.guild(ctx.guild).images()
         saved = await self.get_saved_filenames(ctx.guild)
         cleaned_images = []
@@ -474,13 +556,14 @@ class AddImage(commands.Cog):
         await ctx.tick()
 
     @addimage.command(name="delete", aliases=["remove", "rem", "del"])
-    @checks.mod_or_permissions(manage_channels=True)
     async def remimage(self, ctx: commands.Context, name: str) -> None:
         """
         Remove a selected images
 
         `name` the command name used to post the image
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         guild = ctx.message.guild
         channel = ctx.message.channel
         name = name.lower()
@@ -527,11 +610,12 @@ class AddImage(commands.Cog):
         await ctx.send(name + " has been deleted globally!")
 
     @addimage.command(name="rename")
-    @checks.mod_or_permissions(manage_channels=True)
     async def rename_image(self, ctx: commands.Context, old_name: str, new_name: str) -> None:
         """
         Rename a guild image trigger.
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         guild = ctx.guild
         assert guild is not None
         old_name = old_name.lower()
@@ -663,7 +747,6 @@ class AddImage(commands.Cog):
         return msg
 
     @addimage.command(name="add")
-    @checks.mod_or_permissions(manage_channels=True)
     @commands.bot_has_permissions(attach_files=True)
     async def add_image_guild(self, ctx: commands.Context, name: str) -> None:
         """
@@ -671,6 +754,8 @@ class AddImage(commands.Cog):
 
         `name` the command name used to post the file
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         guild = ctx.message.guild
         name = name.lower()
         if await self.check_command_exists(name, guild):
@@ -696,7 +781,6 @@ class AddImage(commands.Cog):
         await ctx.send(name + " has been added to my files!")
 
     @addimage.command(name="copy", aliases=["transfer"])
-    @checks.mod_or_permissions(manage_channels=True)
     async def copy_image_guild(
         self,
         ctx: commands.Context,
@@ -710,6 +794,8 @@ class AddImage(commands.Cog):
         The current server is always the destination. The `transfer` alias copies;
         it does not remove the source image.
         """
+        if not await self._ensure_can_manage_addimage(ctx):
+            return
         destination_guild = ctx.guild
         if destination_guild is None:
             await ctx.send("This command can only be used in a server.")
