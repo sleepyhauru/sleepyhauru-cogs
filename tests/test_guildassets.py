@@ -46,6 +46,24 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog._get_export_dir(123, "20250101T000000Z"), older)
         self.assertEqual(self.cog._get_export_dir(123, "missing"), None)
 
+    async def test_guildassets_group_shows_export_summary(self):
+        root = self.cog._guild_export_root(321)
+        (root / "20260101T000000Z").mkdir(parents=True)
+        (self.cog._guild_export_root(999) / "20260202T000000Z").mkdir(parents=True)
+        sent = []
+        guild = types.SimpleNamespace(id=321)
+
+        async def send(message):
+            sent.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, clean_prefix="!", send=send)
+
+        await self.cog.guildassets(ctx)
+
+        self.assertIn("Saved exports for this guild: `1`", sent[0])
+        self.assertIn("Tracked source guilds: `2`", sent[0])
+        self.assertIn("Next: run `!guildassets export`", sent[0])
+
     async def test_export_guild_assets_writes_manifest_and_files(self):
         class FakeEmoji:
             def __init__(self, name, animated, url):

@@ -64,6 +64,10 @@ class GuildAssets(commands.Cog):
     def _exports_root(self) -> Path:
         return cog_data_path(self) / "exports"
 
+    @staticmethod
+    def _prefix(ctx: commands.Context) -> str:
+        return getattr(ctx, "clean_prefix", "[p]")
+
     def _guild_export_root(self, guild_id: int) -> Path:
         return self._exports_root() / str(guild_id)
 
@@ -82,6 +86,30 @@ class GuildAssets(commands.Cog):
         if not root.exists():
             return []
         return sorted(path for path in root.iterdir() if path.is_dir())
+
+    def _export_counts(self) -> Tuple[int, int]:
+        root = self._exports_root()
+        if not root.exists():
+            return 0, 0
+
+        guild_dirs = [path for path in root.iterdir() if path.is_dir()]
+        total_exports = 0
+        for guild_dir in guild_dirs:
+            total_exports += len([path for path in guild_dir.iterdir() if path.is_dir()])
+        return len(guild_dirs), total_exports
+
+    def _status_message(self, guild: discord.Guild, prefix: str) -> str:
+        guild_exports = self._list_export_dirs(guild.id)
+        tracked_guilds, total_exports = self._export_counts()
+        latest = guild_exports[-1].name if guild_exports else "None"
+        return (
+            "GuildAssets\n"
+            f"Saved exports for this guild: `{len(guild_exports)}`\n"
+            f"Latest export for this guild: `{latest}`\n"
+            f"Tracked source guilds: `{tracked_guilds}`\n"
+            f"Total saved exports: `{total_exports}`\n"
+            f"Next: run `{prefix}guildassets export`, `{prefix}guildassets list`, or `{prefix}guildassets import <source_guild_id>`."
+        )
 
     def _get_export_dir(self, guild_id: int, timestamp: Optional[str] = None) -> Optional[Path]:
         if timestamp is None:
@@ -294,11 +322,13 @@ class GuildAssets(commands.Cog):
 
         return results
 
-    @commands.group(name="guildassets")
+    @commands.group(name="guildassets", invoke_without_command=True)
     @checks.is_owner()
     @commands.guild_only()
     async def guildassets(self, ctx: commands.Context):
         """Export or import a guild's emojis and stickers."""
+        assert ctx.guild is not None
+        await ctx.send(self._status_message(ctx.guild, self._prefix(ctx)))
 
     @guildassets.command(name="export")
     async def guildassets_export(self, ctx: commands.Context):
