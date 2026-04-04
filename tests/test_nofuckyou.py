@@ -213,7 +213,22 @@ class NoFuckYouTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[2], "Cooldown set to `12s`.")
         self.assertEqual(sent[3], "Thirsty chance set to `0.00`.")
         self.assertIn("Enabled: `False`", sent[4])
+        self.assertIn("Next: run `[p]nofuckyou enable`.", sent[4])
         self.assertIn("Triggers seen: `0`", sent[5])
+
+    async def test_nofuckyouset_group_shows_status_summary(self):
+        sent = []
+        guild = types.SimpleNamespace(id=7)
+
+        async def send(message):
+            sent.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, clean_prefix="!", send=send)
+
+        await self.cog.nofuckyouset(ctx)
+
+        self.assertIn("No Fuck You settings", sent[0])
+        self.assertIn("Next: run `!nofuckyou enable`.", sent[0])
 
 
 if __name__ == "__main__":

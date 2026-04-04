@@ -34,6 +34,10 @@ class NoFuckYou(commands.Cog):
     def _message_text(self, message: discord.Message) -> str:
         return getattr(message, "clean_content", None) or getattr(message, "content", "") or ""
 
+    @staticmethod
+    def _prefix(ctx: commands.Context) -> str:
+        return getattr(ctx, "clean_prefix", "[p]")
+
     def _contains_trigger(self, text: str) -> bool:
         return bool(TRIGGER_RE.search(text))
 
@@ -67,6 +71,26 @@ class NoFuckYou(commands.Cog):
         if random.random() < thirsty_chance:
             return "Please fuck me :pleading_face:"
         return "No fuck you"
+
+    async def _settings_message(self, guild, prefix: str) -> str:
+        conf = self.config.guild(guild)
+        enabled = await conf.enabled()
+        response_chance = await conf.response_chance()
+        thirsty_chance = await conf.thirsty_chance()
+        cooldown_seconds = await conf.cooldown_seconds()
+        next_step = (
+            f"Next: run `{prefix}nofuckyou enable`."
+            if not enabled
+            else f"Next: tune `{prefix}nofuckyou chance <0-1>`, `{prefix}nofuckyou thirsty <0-1>`, or `{prefix}nofuckyou stats`."
+        )
+        return (
+            "No Fuck You settings\n"
+            f"Enabled: `{enabled}`\n"
+            f"Response chance: `{response_chance:.2f}`\n"
+            f"Thirsty chance: `{thirsty_chance:.2f}`\n"
+            f"Cooldown: `{cooldown_seconds}s`\n"
+            f"{next_step}"
+        )
 
     @commands.Cog.listener()
     async def on_message_without_command(self, message: discord.Message):
@@ -119,15 +143,7 @@ class NoFuckYou(commands.Cog):
     async def nofuckyouset_show(self, ctx: commands.Context):
         """Show current No Fuck You settings."""
         assert ctx.guild
-        conf = self.config.guild(ctx.guild)
-        message = (
-            "No Fuck You settings\n"
-            f"Enabled: `{await conf.enabled()}`\n"
-            f"Response chance: `{await conf.response_chance():.2f}`\n"
-            f"Thirsty chance: `{await conf.thirsty_chance():.2f}`\n"
-            f"Cooldown: `{await conf.cooldown_seconds()}s`"
-        )
-        await ctx.send(message)
+        await ctx.send(await self._settings_message(ctx.guild, self._prefix(ctx)))
 
     @nofuckyouset.command(name="enable")
     async def nofuckyouset_enable(self, ctx: commands.Context):
