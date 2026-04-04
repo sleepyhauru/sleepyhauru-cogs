@@ -35,6 +35,10 @@ class VoiceLog(commands.Cog):
     def _utcnow(self) -> datetime:
         return datetime.now(timezone.utc)
 
+    @staticmethod
+    def _prefix(ctx: commands.Context) -> str:
+        return getattr(ctx, "clean_prefix", "[p]")
+
     async def _get_guild_settings(self, guild: discord.Guild) -> dict:
         conf = self.config.guild(guild)
         return {
@@ -44,6 +48,22 @@ class VoiceLog(commands.Cog):
             "log_moves": await conf.log_moves(),
             "move_cooldown_seconds": await conf.move_cooldown_seconds(),
         }
+
+    def _settings_message(self, settings: dict, prefix: str) -> str:
+        next_step = (
+            f"Next: run `{prefix}voicelog enable`."
+            if not settings["enabled"]
+            else f"Next: tune `{prefix}voicelog joins|leaves|moves <true_or_false>` or `{prefix}voicelog cooldown <seconds>`."
+        )
+        return (
+            "Voice Log settings\n"
+            f"Enabled: `{settings['enabled']}`\n"
+            f"Join logs: `{settings['log_joins']}`\n"
+            f"Leave logs: `{settings['log_leaves']}`\n"
+            f"Move logs: `{settings['log_moves']}`\n"
+            f"Move cooldown: `{settings['move_cooldown_seconds']}s`\n"
+            f"{next_step}"
+        )
 
     def _format_duration(self, started_at: Optional[datetime], ended_at: datetime) -> Optional[str]:
         if started_at is None:
@@ -169,7 +189,9 @@ class VoiceLog(commands.Cog):
     @commands.guild_only()
     async def voicelog(self, ctx: commands.Context):
         """Voice Log configuration"""
-        await ctx.send_help()
+        assert ctx.guild
+        settings = await self._get_guild_settings(ctx.guild)
+        await ctx.send(self._settings_message(settings, self._prefix(ctx)))
 
     @voicelog.command(name="enable")
     async def voicelog_enable(self, ctx: commands.Context):
@@ -192,15 +214,7 @@ class VoiceLog(commands.Cog):
         """Show current Voice Log settings for this guild."""
         assert ctx.guild
         settings = await self._get_guild_settings(ctx.guild)
-        message = (
-            f"Voice Log settings\n"
-            f"Enabled: `{settings['enabled']}`\n"
-            f"Join logs: `{settings['log_joins']}`\n"
-            f"Leave logs: `{settings['log_leaves']}`\n"
-            f"Move logs: `{settings['log_moves']}`\n"
-            f"Move cooldown: `{settings['move_cooldown_seconds']}s`"
-        )
-        await ctx.send(message)
+        await ctx.send(self._settings_message(settings, self._prefix(ctx)))
 
     @voicelog.command(name="joins")
     async def voicelog_joins(self, ctx: commands.Context, enabled: bool):

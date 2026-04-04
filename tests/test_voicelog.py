@@ -225,6 +225,20 @@ class VoiceLogTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_voicelog_group_shows_status_and_next_step(self):
+        sent = []
+        guild = types.SimpleNamespace(id=654)
+
+        async def send(message):
+            sent.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, clean_prefix="!", send=send)
+
+        await self.cog.voicelog(ctx)
+
+        self.assertIn("Voice Log settings", sent[0])
+        self.assertIn("Next: run `!voicelog enable`.", sent[0])
+
 
 if __name__ == "__main__":
     unittest.main()
