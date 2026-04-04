@@ -56,6 +56,10 @@ class ModLog(commands.Cog):
             return compact
         return compact[: limit - 3] + "..."
 
+    @staticmethod
+    def _prefix(ctx: commands.Context) -> str:
+        return getattr(ctx, "clean_prefix", "[p]")
+
     def _normalize_name(self, value: Optional[str]) -> str:
         return self._truncate(value or "None", limit=256)
 
@@ -157,6 +161,28 @@ class ModLog(commands.Cog):
         if getter is None:
             return None
         return getter(channel_id)
+
+    async def _settings_message(self, guild, prefix: str) -> str:
+        conf = self.config.guild(guild)
+        channel_id = await conf.channel_id()
+        enabled = await conf.enabled()
+        audit_window = await conf.audit_window_seconds()
+        channel_label = f"<#{channel_id}>" if channel_id else "Not set"
+
+        if not channel_id:
+            next_step = f"Next: run `{prefix}modlog here` in the channel you want to use."
+        elif not enabled:
+            next_step = f"Next: run `{prefix}modlog enable` to start logging there."
+        else:
+            next_step = f"Next: run `{prefix}modlog test` to verify the log channel."
+
+        return (
+            "ModLog settings\n"
+            f"Enabled: `{enabled}`\n"
+            f"Channel: {channel_label}\n"
+            f"Audit window: `{audit_window}s`\n"
+            f"{next_step}"
+        )
 
     def _audit_action(self, name: str):
         audit_log_action = getattr(discord, "AuditLogAction", None)
@@ -592,22 +618,14 @@ class ModLog(commands.Cog):
     @commands.guild_only()
     async def modlog(self, ctx: commands.Context):
         """Configure the moderation log channel."""
-        await self.modlog_show(ctx)
+        assert ctx.guild
+        await ctx.send(await self._settings_message(ctx.guild, self._prefix(ctx)))
 
     @modlog.command(name="show")
     async def modlog_show(self, ctx: commands.Context):
         """Show current mod-log settings."""
         assert ctx.guild
-        conf = self.config.guild(ctx.guild)
-        channel_id = await conf.channel_id()
-        channel_label = f"<#{channel_id}>" if channel_id else "Not set"
-        message = (
-            "ModLog settings\n"
-            f"Enabled: `{await conf.enabled()}`\n"
-            f"Channel: {channel_label}\n"
-            f"Audit window: `{await conf.audit_window_seconds()}s`"
-        )
-        await ctx.send(message)
+        await ctx.send(await self._settings_message(ctx.guild, self._prefix(ctx)))
 
     @modlog.command(name="here")
     async def modlog_here(self, ctx: commands.Context):
@@ -630,6 +648,14 @@ class ModLog(commands.Cog):
         assert ctx.guild
         await self.config.guild(ctx.guild).enabled.set(False)
         await ctx.send("ModLog disabled.")
+
+    @modlog.command(name="auditwindow", aliases=["window"])
+    async def modlog_audit_window(self, ctx: commands.Context, seconds: int):
+        """Set how long to search audit logs for matching actions."""
+        assert ctx.guild
+        seconds = max(0, seconds)
+        await self.config.guild(ctx.guild).audit_window_seconds.set(seconds)
+        await ctx.send(f"ModLog audit window set to `{seconds}s`.")
 
     @modlog.command(name="test")
     async def modlog_test(self, ctx: commands.Context):

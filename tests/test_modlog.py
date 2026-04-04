@@ -62,6 +62,25 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await conf.channel_id(), 99)
         self.assertEqual(sent[0], "ModLog channel set to <#99> and enabled.")
         self.assertIn("Channel: <#99>", sent[1])
+        self.assertIn("Next: run `[p]modlog test`", sent[1])
+
+    async def test_modlog_group_summary_and_audit_window_update(self):
+        sent = []
+        guild = types.SimpleNamespace(id=11)
+        channel = types.SimpleNamespace(id=123)
+
+        async def send(message):
+            sent.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, channel=channel, clean_prefix="!", send=send)
+
+        await self.cog.modlog(ctx)
+        await self.cog.modlog_audit_window(ctx, 25)
+        await self.cog.modlog(ctx)
+
+        self.assertIn("Next: run `!modlog here`", sent[0])
+        self.assertEqual(sent[1], "ModLog audit window set to `25s`.")
+        self.assertIn("Audit window: `25s`", sent[2])
 
     async def test_on_member_ban_sends_embed_with_audit_info(self):
         sent_embeds = []
