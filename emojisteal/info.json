@@ -1,12 +1,15 @@
 {
     "author": ["hollowstrawberry"],
     "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
     "description": "Steals emojis and stickers sent by other people and optionally uploads them to your own server. Supports context menu commands. Can also upload stickers from mobile.",
     "hidden": false,
-    "install_msg": "\uD83D\uDE36 __**EmojiSteal**__ ```Cog installed. Instructions:\n1. Load it with [p]load emojisteal\n2. View commands with [p]help EmojiSteal\n3a. Optionally, enable the context menu commands with [p]slash enablecog emojisteal\n  3b. Sync commands with [p]slash sync\n  3c. You may need to restart Discord to see the new commands.```",
+    "disabled": false,
+    "install_msg": "Load it with `[p]load emojisteal`. Use `[p]steal` on a reply, `[p]steal upload` to import the replied-to emoji or sticker, and `[p]getemoji` for direct asset links. To enable the message context commands, run `[p]slash enablecog emojisteal` and `[p]slash sync`.",
     "required_cogs": {},
     "requirements": [],
-    "short": "Steals emojis and stickers sent by other people.",
+    "short": "Steal emojis and stickers from replied-to messages.",
     "end_user_data_statement": "This cog does not store any user data.",
-    "tags": ["crab", "emoji", "sticker", "steal", "image", "slash", "message", "context", "menu"]
+    "tags": ["emoji", "sticker", "steal", "image", "context", "menu"],
+    "type": "COG"
 }
