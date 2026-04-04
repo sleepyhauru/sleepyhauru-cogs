@@ -51,6 +51,7 @@ Owner-only backup tools for server emojis and stickers. Export a guild's current
 Quick start:
 - In the source server, run `[p]guildassets export`.
 - Check saved export history with `[p]guildassets list` or `[p]guildassets list <source_guild_id>`.
+- In the destination server, run `[p]guildassets preview <source_guild_id>` to see what would be added or skipped.
 - In the destination server, run `[p]guildassets import <source_guild_id>` and optionally pass a timestamp from the export list.
 
 ### Kagi (`kagi`)

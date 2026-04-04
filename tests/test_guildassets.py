@@ -162,6 +162,52 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["skipped_stickers"], [])
         self.assertEqual(added_stickers, ["hi"])
 
+    async def test_plan_guild_assets_import_reports_adds_and_skips_without_mutating(self):
+        export_dir = self.cog._guild_export_root(556) / "20260330T000000Z"
+        (export_dir / "emojis").mkdir(parents=True)
+        (export_dir / "stickers").mkdir(parents=True)
+        (export_dir / "emojis" / "001_wave.png").write_bytes(b"emoji-bytes")
+        (export_dir / "emojis" / "002_dance.gif").write_bytes(b"emoji2-bytes")
+        (export_dir / "stickers" / "001_hi.png").write_bytes(b"sticker-bytes")
+        (export_dir / "manifest.json").write_text(
+            f"""{{
+  "guild_id": 556,
+  "emojis": [
+    {{"name": "wave", "animated": false, "filename": "emojis/001_wave.png", "sha256": "{sha256(b"emoji-bytes").hexdigest()}"}},
+    {{"name": "dance", "animated": true, "filename": "emojis/002_dance.gif", "sha256": "{sha256(b"emoji2-bytes").hexdigest()}"}}
+  ],
+  "stickers": [
+    {{"name": "hi", "description": "desc", "emoji": "🙂", "filename": "stickers/001_hi.png", "sha256": "{sha256(b"sticker-bytes").hexdigest()}"}}
+  ]
+}}""",
+            encoding="utf-8",
+        )
+
+        async def create_custom_emoji(**kwargs):
+            raise AssertionError("preview should not create emojis")
+
+        async def create_sticker(**kwargs):
+            raise AssertionError("preview should not create stickers")
+
+        guild = types.SimpleNamespace(
+            emojis=[types.SimpleNamespace(animated=False)],
+            emoji_limit=1,
+            stickers=[],
+            sticker_limit=1,
+            create_custom_emoji=create_custom_emoji,
+            create_sticker=create_sticker,
+        )
+
+        plan = await self.cog._plan_guild_assets_import(guild, export_dir)
+
+        self.assertEqual(plan["source_guild_id"], 556)
+        self.assertEqual(plan["added_emojis"], ["dance"])
+        self.assertEqual(plan["skipped_emojis"], ["wave (no static slots)"])
+        self.assertEqual(plan["added_stickers"], ["hi"])
+        self.assertEqual(plan["skipped_stickers"], [])
+        self.assertEqual([item["name"] for item in plan["emoji_payloads"]], ["dance"])
+        self.assertEqual([item["name"] for item in plan["sticker_payloads"]], ["hi"])
+
     async def test_import_guild_assets_skips_existing_name_and_hash_matches(self):
         export_dir = self.cog._guild_export_root(777) / "20260330T000000Z"
         (export_dir / "emojis").mkdir(parents=True)
@@ -304,3 +350,50 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results["added_emojis"], ["wave"])
         self.assertEqual(attempts["count"], 2)
         self.assertEqual(sleep_calls, [guildassets_module.EMOJI_UPLOAD_RETRY_BASE, guildassets_module.EMOJI_UPLOAD_DELAY])
+
+    async def test_guildassets_preview_summarizes_planned_import(self):
+        export_dir = self.cog._guild_export_root(999) / "20260330T000000Z"
+        export_dir.mkdir(parents=True)
+        sent = []
+        guild = types.SimpleNamespace(name="Target Guild")
+
+        async def send(message):
+            sent.append(message)
+
+        class Typing:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            clean_prefix="!",
+            send=send,
+            typing=lambda: Typing(),
+        )
+
+        async def fake_plan(target_guild, preview_dir):
+            self.assertIs(target_guild, guild)
+            self.assertEqual(preview_dir, export_dir)
+            return {
+                "source_guild_id": 999,
+                "added_emojis": ["dance"],
+                "skipped_emojis": ["wave (already exists)"],
+                "added_stickers": ["hi"],
+                "skipped_stickers": ["bye (no sticker slots)"],
+                "emoji_payloads": [],
+                "sticker_payloads": [],
+            }
+
+        self.cog._plan_guild_assets_import = fake_plan
+
+        await self.cog.guildassets_preview(ctx, 999, "20260330T000000Z")
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Preview import from `999` into `Target Guild` using `20260330T000000Z`.", sent[0])
+        self.assertIn("Would add emojis: 1", sent[0])
+        self.assertIn("Emoji plan: dance", sent[0])
+        self.assertIn("Skipped emojis: wave (already exists)", sent[0])
+        self.assertIn("Run `!guildassets import 999 20260330T000000Z` to apply this import.", sent[0])

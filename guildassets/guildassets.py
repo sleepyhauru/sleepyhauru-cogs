@@ -28,7 +28,7 @@ class GuildAssets(commands.Cog):
     """Owner-only guild emoji and sticker export/import tools."""
 
     __author__ = ["sleepyhauru"]
-    __version__ = "1.2.0"
+    __version__ = "1.3.0"
 
     def __init__(self, bot):
         self.bot = bot
@@ -108,7 +108,8 @@ class GuildAssets(commands.Cog):
             f"Latest export for this guild: `{latest}`\n"
             f"Tracked source guilds: `{tracked_guilds}`\n"
             f"Total saved exports: `{total_exports}`\n"
-            f"Next: run `{prefix}guildassets export`, `{prefix}guildassets list`, or `{prefix}guildassets import <source_guild_id>`."
+            f"Next: run `{prefix}guildassets export`, `{prefix}guildassets list`, "
+            f"`{prefix}guildassets preview <source_guild_id>`, or `{prefix}guildassets import <source_guild_id>`."
         )
 
     def _get_export_dir(self, guild_id: int, timestamp: Optional[str] = None) -> Optional[Path]:
@@ -236,21 +237,17 @@ class GuildAssets(commands.Cog):
                     raise
                 await asyncio.sleep(EMOJI_UPLOAD_RETRY_BASE * attempt)
 
-    async def _import_guild_assets(
-        self,
-        guild: discord.Guild,
-        export_dir: Path,
-        *,
-        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
-    ) -> Dict[str, List[str]]:
+    async def _plan_guild_assets_import(self, guild: discord.Guild, export_dir: Path) -> dict:
         manifest = self._load_manifest(export_dir)
-        results = {
+        plan = {
+            "source_guild_id": manifest.get("guild_id"),
             "added_emojis": [],
             "skipped_emojis": [],
             "added_stickers": [],
             "skipped_stickers": [],
+            "emoji_payloads": [],
+            "sticker_payloads": [],
         }
-        imported_emoji_count = 0
 
         async with aiohttp.ClientSession() as session:
             existing_emoji_keys = await self._existing_emoji_keys(session, guild)
@@ -260,65 +257,137 @@ class GuildAssets(commands.Cog):
                 for emoji in guild.emojis
                 if bool(getattr(emoji, "animated", False))
             }
+            remaining_emoji_slots = {
+                False: self._remaining_emoji_slots(guild, False),
+                True: self._remaining_emoji_slots(guild, True),
+            }
+            remaining_sticker_slots = guild.sticker_limit - len(guild.stickers)
 
             for emoji in manifest.get("emojis", []):
                 animated = bool(emoji.get("animated"))
                 path = export_dir / emoji["filename"]
-                name = self._sanitize_emoji_name(emoji["name"], f"emoji{len(results['added_emojis']) + 1}")
+                name = self._sanitize_emoji_name(emoji["name"], f"emoji{len(plan['added_emojis']) + 1}")
                 image = path.read_bytes()
                 asset_hash = emoji.get("sha256") or self._hash_bytes(image)
                 key = (name, animated, asset_hash)
 
                 if key in existing_emoji_keys:
-                    results["skipped_emojis"].append(f"{name} (already exists)")
+                    plan["skipped_emojis"].append(f"{name} (already exists)")
                     continue
                 # Discord may expose an existing animated emoji as animated webp even when the
                 # exported asset on disk is gif, which makes a byte hash comparison unreliable.
                 if animated and name in existing_animated_emoji_names:
-                    results["skipped_emojis"].append(f"{name} (already exists)")
+                    plan["skipped_emojis"].append(f"{name} (already exists)")
                     continue
-                if self._remaining_emoji_slots(guild, animated) <= 0:
-                    results["skipped_emojis"].append(f"{emoji['name']} (no {'animated' if animated else 'static'} slots)")
+                if remaining_emoji_slots[animated] <= 0:
+                    slot_label = "animated" if animated else "static"
+                    plan["skipped_emojis"].append(f"{emoji['name']} (no {slot_label} slots)")
                     continue
 
-                await self._create_emoji_with_retries(
-                    guild,
-                    name=name,
-                    image=image,
-                    reason=f"Imported from guild {manifest.get('guild_id')}",
-                )
                 existing_emoji_keys.add(key)
                 if animated:
                     existing_animated_emoji_names.add(name)
-                results["added_emojis"].append(name)
-                imported_emoji_count += 1
-                if progress_callback is not None and imported_emoji_count % IMPORT_PROGRESS_EVERY == 0:
-                    await progress_callback(f"Imported {imported_emoji_count} emojis so far...")
-                await asyncio.sleep(EMOJI_UPLOAD_DELAY)
+                remaining_emoji_slots[animated] -= 1
+                plan["added_emojis"].append(name)
+                plan["emoji_payloads"].append(
+                    {
+                        "name": name,
+                        "image": image,
+                    }
+                )
 
             for sticker in manifest.get("stickers", []):
                 path = export_dir / sticker["filename"]
-                name = self._sanitize_sticker_name(sticker["name"], f"sticker {len(results['added_stickers']) + 1}")
-                asset_hash = sticker.get("sha256") or self._hash_bytes(path.read_bytes())
+                name = self._sanitize_sticker_name(sticker["name"], f"sticker {len(plan['added_stickers']) + 1}")
+                payload = path.read_bytes()
+                asset_hash = sticker.get("sha256") or self._hash_bytes(payload)
                 key = (name, asset_hash)
 
                 if key in existing_sticker_keys:
-                    results["skipped_stickers"].append(f"{name} (already exists)")
+                    plan["skipped_stickers"].append(f"{name} (already exists)")
                     continue
-                if len(guild.stickers) >= guild.sticker_limit:
-                    results["skipped_stickers"].append(f"{sticker['name']} (no sticker slots)")
+                if remaining_sticker_slots <= 0:
+                    plan["skipped_stickers"].append(f"{sticker['name']} (no sticker slots)")
                     continue
 
-                file = discord.File(path)
-                await guild.create_sticker(
-                    name=name,
-                    description=sticker.get("description") or DEFAULT_STICKER_DESCRIPTION,
-                    emoji=sticker.get("emoji") or STICKER_EMOJI,
-                    file=file,
-                    reason=f"Imported from guild {manifest.get('guild_id')}",
-                )
                 existing_sticker_keys.add(key)
-                results["added_stickers"].append(name)
+                remaining_sticker_slots -= 1
+                plan["added_stickers"].append(name)
+                plan["sticker_payloads"].append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "description": sticker.get("description") or DEFAULT_STICKER_DESCRIPTION,
+                        "emoji": sticker.get("emoji") or STICKER_EMOJI,
+                    }
+                )
+
+        return plan
+
+    def _format_import_preview(
+        self,
+        guild: discord.Guild,
+        source_guild_id: int,
+        export_dir: Path,
+        preview: dict,
+        prefix: str,
+    ) -> str:
+        lines = [
+            f"Preview import from `{source_guild_id}` into `{guild.name}` using `{export_dir.name}`.",
+            f"Would add emojis: {len(preview['added_emojis'])}",
+            f"Would add stickers: {len(preview['added_stickers'])}",
+        ]
+        if preview["added_emojis"]:
+            lines.append(f"Emoji plan: {', '.join(preview['added_emojis'])}")
+        if preview["added_stickers"]:
+            lines.append(f"Sticker plan: {', '.join(preview['added_stickers'])}")
+        if preview["skipped_emojis"]:
+            lines.append(f"Skipped emojis: {', '.join(preview['skipped_emojis'])}")
+        if preview["skipped_stickers"]:
+            lines.append(f"Skipped stickers: {', '.join(preview['skipped_stickers'])}")
+        lines.append(f"Run `{prefix}guildassets import {source_guild_id} {export_dir.name}` to apply this import.")
+        return "\n".join(lines)
+
+    async def _import_guild_assets(
+        self,
+        guild: discord.Guild,
+        export_dir: Path,
+        *,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> Dict[str, List[str]]:
+        plan = await self._plan_guild_assets_import(guild, export_dir)
+        results = {
+            "added_emojis": [],
+            "skipped_emojis": list(plan["skipped_emojis"]),
+            "added_stickers": [],
+            "skipped_stickers": list(plan["skipped_stickers"]),
+        }
+        imported_emoji_count = 0
+
+        source_guild_id = plan["source_guild_id"]
+        for emoji in plan["emoji_payloads"]:
+            await self._create_emoji_with_retries(
+                guild,
+                name=emoji["name"],
+                image=emoji["image"],
+                reason=f"Imported from guild {source_guild_id}",
+            )
+            results["added_emojis"].append(emoji["name"])
+            imported_emoji_count += 1
+            if progress_callback is not None and imported_emoji_count % IMPORT_PROGRESS_EVERY == 0:
+                await progress_callback(f"Imported {imported_emoji_count} emojis so far...")
+            await asyncio.sleep(EMOJI_UPLOAD_DELAY)
+
+        for sticker in plan["sticker_payloads"]:
+            file = discord.File(sticker["path"])
+            await guild.create_sticker(
+                name=sticker["name"],
+                description=sticker["description"],
+                emoji=sticker["emoji"],
+                file=file,
+                reason=f"Imported from guild {source_guild_id}",
+            )
+            results["added_stickers"].append(sticker["name"])
 
         return results
 
@@ -415,6 +484,35 @@ class GuildAssets(commands.Cog):
         if results["skipped_stickers"]:
             lines.append(f"Skipped stickers: {', '.join(results['skipped_stickers'])}")
         await ctx.send("\n".join(lines))
+
+    @guildassets.command(name="preview")
+    async def guildassets_preview(self, ctx: commands.Context, source_guild_id: int, timestamp: Optional[str] = None):
+        """Preview a saved import without changing this server."""
+        guild = ctx.guild
+        if guild is None:
+            await ctx.send("This command only works in a server.")
+            return
+
+        export_dir = self._get_export_dir(source_guild_id, timestamp)
+        if export_dir is None:
+            if timestamp is None:
+                await ctx.send(f"No export found for guild ID `{source_guild_id}`.")
+            else:
+                await ctx.send(f"No export `{timestamp}` found for guild ID `{source_guild_id}`.")
+            return
+
+        async with ctx.typing():
+            preview = await self._plan_guild_assets_import(guild, export_dir)
+
+        await ctx.send(
+            self._format_import_preview(
+                guild,
+                source_guild_id=source_guild_id,
+                export_dir=export_dir,
+                preview=preview,
+                prefix=self._prefix(ctx),
+            )
+        )
 
     @guildassets.command(name="delete")
     async def guildassets_delete(self, ctx: commands.Context, source_guild_id: int, timestamp: str):
