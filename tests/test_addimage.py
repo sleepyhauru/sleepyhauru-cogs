@@ -243,6 +243,27 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.cog.config.guild(self.guild).images(), [])
         self.assertEqual(ticked, [True])
 
+    async def test_addimage_group_shows_summary(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await self.cog.config.guild(self.guild).images.set(
+            [{"command_name": "guildimg", "count": 1, "author": 1, "file_loc": "x.png"}]
+        )
+        await self.cog.config.images.set(
+            [{"command_name": "globalimg", "count": 2, "author": 1, "file_loc": "g.png"}]
+        )
+
+        ctx = types.SimpleNamespace(guild=self.guild, clean_prefix="!", send=send)
+
+        await self.cog.addimage(ctx)
+
+        self.assertIn("Guild media saved: `1`", sent[0])
+        self.assertIn("Global media available: `1`", sent[0])
+        self.assertIn("Next: run `!addimage add <name>`", sent[0])
+
     async def test_clean_deleted_images_handles_missing_guild_folder(self):
         ticked = []
 

@@ -2,17 +2,17 @@
     "author": [
         "sleepyhauru"
     ],
-    "description": "Add saved media for the bot to directly upload similar to alias.",
+    "description": "Save guild and global media so the bot can upload them later by trigger name.",
     "disabled": false,
-    "end_user_data_statement": "This cog stores attachements uploaded by users for the purposes of creating custom commands to send uploaded attachments.\nUsers may delete their own data with or without making a data request.",
+    "end_user_data_statement": "This cog stores attachments uploaded by users so the bot can re-upload them later.\nUsers may delete their own data with or without making a data request.",
     "hidden": false,
-    "install_msg": "This cog will create folders to save and delete uploaded media locally. `[p]addimage` to add media to the guild. Owner can add global bot media.",
+    "install_msg": "Use `[p]addimage` to review saved media. Add guild media with `[p]addimage add <name>`, or owner-managed global media with `[p]addimage addglobal <name>`.",
     "max_bot_version": "0.0.0",
     "min_bot_version": "3.5.0",
     "min_python_version": [
         3,
-        7,
-        2
+        9,
+        0
     ],
     "name": "AddImage",
     "permissions": [
@@ -20,7 +20,7 @@
     ],
     "required_cogs": {},
     "requirements": [],
-    "short": "Add saved media for direct upload per guild and globally.",
-    "tags": [],
+    "short": "Save media for direct upload per guild and globally.",
+    "tags": ["media", "attachments", "images", "utility"],
     "type": "COG"
 }

@@ -87,6 +87,10 @@ class AddImage(commands.Cog):
     async def first_word(self, msg: str) -> str:
         return msg.split(" ")[0].lower()
 
+    @staticmethod
+    def _prefix(ctx: commands.Context) -> str:
+        return getattr(ctx, "clean_prefix", "[p]")
+
     async def get_prefix(self, message: discord.Message) -> str:
         """
         From Redbot Alias Cog
@@ -296,13 +300,27 @@ class AddImage(commands.Cog):
         else:
             return False
 
-    @commands.group()
+    async def _summary_message(self, guild: discord.Guild, prefix: str) -> str:
+        guild_images = await self.config.guild(guild).images()
+        global_images = await self.config.images()
+        ignore_global = await self.config.guild(guild).ignore_global()
+        global_summary = "ignored in this server" if ignore_global else str(len(global_images))
+        return (
+            "AddImage\n"
+            f"Guild media saved: `{len(guild_images)}`\n"
+            f"Global media available: `{global_summary}`\n"
+            f"Ignore global media: `{ignore_global}`\n"
+            f"Next: run `{prefix}addimage add <name>` to save media, or `{prefix}addimage list` to browse it."
+        )
+
+    @commands.group(invoke_without_command=True)
     @commands.guild_only()
     async def addimage(self, ctx: commands.Context) -> None:
         """
         Add saved media for the bot to directly upload
         """
-        pass
+        assert ctx.guild is not None
+        await ctx.send(await self._summary_message(ctx.guild, self._prefix(ctx)))
 
     @checks.is_owner()
     @addimage.command(name="setmaxsize")
