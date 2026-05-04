@@ -34,6 +34,7 @@ EMOJI_SLOTS = "This server doesn't have any more space for that emoji type."
 UPLOAD_FAILED = "Failed to upload emoji"
 UPLOAD_NOT_ALLOWED = "You need Manage Emojis and Stickers or be on the Remoji upload allowlist."
 SETTINGS_HINT = "Use `remojiset allowuser`, `remojiset denyuser`, or `remojiset showallowlist`."
+EMOJI_SOURCE_HINT = "Provide custom emoji text or reply to a message containing custom emojis."
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,39 @@ class Remoji(commands.Cog):
         webp_url = f"https://cdn.discordapp.com/emojis/{emoji.id}.webp?animated=true"
         return await self._download_image_url(webp_url)
 
+    async def _get_referenced_message(self, ctx: commands.Context) -> Optional[discord.Message]:
+        message = getattr(ctx, "message", None)
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return None
+
+        resolved = getattr(reference, "resolved", None)
+        if resolved is not None and getattr(resolved, "content", None) is not None:
+            return resolved
+
+        message_id = getattr(reference, "message_id", None)
+        if not message_id:
+            return None
+
+        channel = getattr(ctx, "channel", None) or getattr(message, "channel", None)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None:
+            return None
+
+        try:
+            return await fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def _resolve_source_text(self, ctx: commands.Context, provided: Optional[str]) -> Optional[str]:
+        if provided and provided.strip():
+            return provided
+
+        message = await self._get_referenced_message(ctx)
+        if message is None:
+            return None
+        return getattr(message, "content", None)
+
     async def _create_emoji(
         self,
         guild: discord.Guild,
@@ -352,7 +386,7 @@ class Remoji(commands.Cog):
             f"Static slots remaining: `{static_slots}`\n"
             f"Animated slots remaining: `{animated_slots}`\n"
             f"Use `{prefix}remoji upload <url> <name>`, `{prefix}remoji copy <emoji> [name]`, "
-            f"or `{prefix}remoji copymany <emojis...>`."
+            f"or reply to a message with `{prefix}remoji copy`."
         )
 
     @remoji.command(name="upload")
@@ -392,12 +426,17 @@ class Remoji(commands.Cog):
     @remoji.command(name="copy")
     @commands.guild_only()
     @commands.bot_has_permissions(manage_emojis=True)
-    async def remoji_copy(self, ctx: commands.Context, emoji: str, *, name: Optional[str] = None):
+    async def remoji_copy(self, ctx: commands.Context, emoji: Optional[str] = None, *, name: Optional[str] = None):
         """Copy one custom Discord emoji into this server."""
         assert ctx.guild is not None
         if not await self._ensure_upload_allowed(ctx, ctx.guild, ctx.author):
             return
-        found = extract_emojis(emoji)
+        source_text = await self._resolve_source_text(ctx, emoji)
+        if source_text is None:
+            await ctx.send(EMOJI_SOURCE_HINT)
+            return
+
+        found = extract_emojis(source_text)
         if not found:
             await ctx.send(NO_EMOJIS)
             return
@@ -419,12 +458,17 @@ class Remoji(commands.Cog):
     @remoji.command(name="copymany", aliases=["copyall", "multiple"])
     @commands.guild_only()
     @commands.bot_has_permissions(manage_emojis=True)
-    async def remoji_copy_many(self, ctx: commands.Context, *, emojis: str):
+    async def remoji_copy_many(self, ctx: commands.Context, *, emojis: Optional[str] = None):
         """Copy multiple custom Discord emojis into this server."""
         assert ctx.guild is not None
         if not await self._ensure_upload_allowed(ctx, ctx.guild, ctx.author):
             return
-        found = unique_emojis(extract_emojis(emojis))
+        source_text = await self._resolve_source_text(ctx, emojis)
+        if source_text is None:
+            await ctx.send(EMOJI_SOURCE_HINT)
+            return
+
+        found = unique_emojis(extract_emojis(source_text))
         if not found:
             await ctx.send(NO_EMOJIS)
             return
@@ -448,9 +492,14 @@ class Remoji(commands.Cog):
         await ctx.send("\n".join(lines))
 
     @remoji.command(name="url", aliases=["asset"])
-    async def remoji_url(self, ctx: commands.Context, *, emoji: str):
+    async def remoji_url(self, ctx: commands.Context, *, emoji: Optional[str] = None):
         """Show CDN URLs for custom Discord emojis."""
-        found = unique_emojis(extract_emojis(emoji))
+        source_text = await self._resolve_source_text(ctx, emoji)
+        if source_text is None:
+            await ctx.send(EMOJI_SOURCE_HINT)
+            return
+
+        found = unique_emojis(extract_emojis(source_text))
         if not found:
             await ctx.send(NO_EMOJIS)
             return
@@ -466,8 +515,7 @@ class Remoji(commands.Cog):
         await ctx.send(
             "Remoji manages custom emoji uploads and copies.\n"
             f"Static slots remaining: `{static_slots}`\n"
-            f"Animated slots remaining: `{animated_slots}`\n"
-            "Inspired by https://github.com/remoji-bot/remoji-bot"
+            f"Animated slots remaining: `{animated_slots}`"
         )
 
     @commands.group(name="remojiset", invoke_without_command=True)

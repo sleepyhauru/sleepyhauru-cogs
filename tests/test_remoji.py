@@ -239,6 +239,32 @@ class RemojiCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reactions, [created])
         self.assertEqual(sent, ["Copied `:dance:` to this server: namespace(name='dance')"])
 
+    async def test_remoji_copy_uses_replied_message_when_no_emoji_argument(self):
+        created = types.SimpleNamespace(name="reply")
+        guild = types.SimpleNamespace(
+            id=12,
+            emojis=[],
+            emoji_limit=10,
+            create_custom_emoji=AsyncMock(return_value=created),
+        )
+        ctx, sent, _ = self.make_ctx(guild)
+
+        async def fetch_message(message_id):
+            self.assertEqual(message_id, 55)
+            return types.SimpleNamespace(content="<:reply:333333333333333333>")
+
+        ctx.message.reference = types.SimpleNamespace(message_id=55)
+        ctx.channel = types.SimpleNamespace(fetch_message=fetch_message)
+        cog = remoji.Remoji(bot=object())
+        url = "https://cdn.discordapp.com/emojis/333333333333333333.png"
+        cog.session = FakeSession({url: FakeResponse(body=b"png-bytes")})
+
+        await cog.remoji_copy(ctx)
+
+        guild.create_custom_emoji.assert_awaited_once()
+        self.assertEqual(guild.create_custom_emoji.await_args.kwargs["name"], "reply")
+        self.assertEqual(sent, ["Copied `:reply:` to this server: namespace(name='reply')"])
+
     async def test_remoji_copy_many_reports_success_and_failures(self):
         created = types.SimpleNamespace(name="one")
         guild = types.SimpleNamespace(
@@ -267,6 +293,35 @@ class RemojiCommandTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_remoji_copy_many_uses_resolved_reply_for_hybrid_context_without_input(self):
+        created = [types.SimpleNamespace(name="one"), types.SimpleNamespace(name="two")]
+        guild = types.SimpleNamespace(
+            id=13,
+            emojis=[],
+            emoji_limit=10,
+            create_custom_emoji=AsyncMock(side_effect=created),
+        )
+        ctx, sent, _ = self.make_ctx(guild)
+        ctx.interaction = types.SimpleNamespace()
+        ctx.message.reference = types.SimpleNamespace(
+            resolved=types.SimpleNamespace(
+                content="<:one:444444444444444444> <:two:555555555555555555>"
+            )
+        )
+        cog = remoji.Remoji(bot=object())
+        cog.session = FakeSession(
+            {
+                "https://cdn.discordapp.com/emojis/444444444444444444.png": FakeResponse(body=b"one"),
+                "https://cdn.discordapp.com/emojis/555555555555555555.png": FakeResponse(body=b"two"),
+            }
+        )
+
+        with patch.object(remoji.asyncio, "sleep", AsyncMock()):
+            await cog.remoji_copy_many(ctx)
+
+        self.assertEqual(guild.create_custom_emoji.await_count, 2)
+        self.assertEqual(sent, ["Uploaded 2/2 emojis.\nnamespace(name='one') namespace(name='two')"])
+
     async def test_remoji_url_lists_unique_asset_urls(self):
         ctx, sent, _ = self.make_ctx(guild=types.SimpleNamespace(id=5, emojis=[], emoji_limit=1))
         cog = remoji.Remoji(bot=object())
@@ -274,6 +329,25 @@ class RemojiCommandTest(unittest.IsolatedAsyncioTestCase):
         await cog.remoji_url(ctx, emoji="<:one:111111111111111111> <:one:111111111111111111>")
 
         self.assertEqual(sent, ["https://cdn.discordapp.com/emojis/111111111111111111.png"])
+
+    async def test_remoji_url_uses_replied_message_when_no_emoji_text(self):
+        ctx, sent, _ = self.make_ctx(guild=types.SimpleNamespace(id=14, emojis=[], emoji_limit=1))
+        ctx.message.reference = types.SimpleNamespace(
+            resolved=types.SimpleNamespace(content="<a:spin:666666666666666666>")
+        )
+        cog = remoji.Remoji(bot=object())
+
+        await cog.remoji_url(ctx)
+
+        self.assertEqual(sent, ["https://cdn.discordapp.com/emojis/666666666666666666.gif"])
+
+    async def test_remoji_copy_without_input_or_reply_prompts_for_source(self):
+        ctx, sent, _ = self.make_ctx(guild=types.SimpleNamespace(id=15, emojis=[], emoji_limit=1))
+        cog = remoji.Remoji(bot=object())
+
+        await cog.remoji_copy(ctx)
+
+        self.assertEqual(sent, [remoji.EMOJI_SOURCE_HINT])
 
     async def test_remoji_upload_uses_content_type_for_animated_slot_and_suffixes_name(self):
         created = types.SimpleNamespace(name="wave_2")
@@ -365,6 +439,27 @@ class RemojiCommandTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sent[0], "Copying emojis... 5/6 processed, 5 uploaded, 0 failed.")
         self.assertTrue(sent[-1].startswith("Uploaded 6/6 emojis."))
+
+    async def test_remoji_info_does_not_include_upstream_inspiration_link(self):
+        ctx, sent, _ = self.make_ctx(
+            guild=types.SimpleNamespace(
+                id=16,
+                emojis=[types.SimpleNamespace(animated=False), types.SimpleNamespace(animated=True)],
+                emoji_limit=10,
+            )
+        )
+        cog = remoji.Remoji(bot=object())
+
+        await cog.remoji_info(ctx)
+
+        self.assertNotIn("Inspired", sent[0])
+        self.assertNotIn("github.com/remoji-bot", sent[0])
+        self.assertEqual(
+            sent[0],
+            "Remoji manages custom emoji uploads and copies.\n"
+            "Static slots remaining: `9`\n"
+            "Animated slots remaining: `9`",
+        )
 
 
 class FakeInteractionResponse:

@@ -98,6 +98,7 @@ Quick start:
 - Use `[p]remoji upload <url> <name>` to upload an image from Discord CDN or Imgur.
 - Use `[p]remoji copy <emoji> [name]` to copy one custom emoji.
 - Use `[p]remoji copymany <emojis...>` to copy several custom emojis at once.
+- Reply to a message with `[p]remoji copy`, `[p]remoji copymany`, or `[p]remoji url` to use the replied-to emojis.
 - Use `[p]remojiset allowuser <user>` to allow uploads without Manage Emojis.
 - Enable slash/context commands with `[p]slash enablecog remoji` and `[p]slash sync`.
 

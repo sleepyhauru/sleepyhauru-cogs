@@ -5,7 +5,7 @@
     "description": "Upload Discord custom emojis from allowed image URLs and copy custom emojis from other servers. Includes hybrid commands, message context menus, duplicate-name suffixing, and a per-guild upload allowlist.",
     "hidden": false,
     "disabled": false,
-    "install_msg": "Load it with `[p]load remoji`. Use `[p]remoji upload <url> <name>`, `[p]remoji copy <emoji> [name]`, and `[p]remoji copymany <emojis...>`. To enable slash and message context commands, run `[p]slash enablecog remoji` and `[p]slash sync`. Use `[p]remojiset allowuser <user>` to allow uploads without Manage Emojis.",
+    "install_msg": "Load it with `[p]load remoji`. Use `[p]remoji upload <url> <name>`, `[p]remoji copy <emoji> [name]`, and `[p]remoji copymany <emojis...>`. You can also reply to a message with `[p]remoji copy`, `[p]remoji copymany`, or `[p]remoji url`. To enable slash and message context commands, run `[p]slash enablecog remoji` and `[p]slash sync`. Use `[p]remojiset allowuser <user>` to allow uploads without Manage Emojis.",
     "required_cogs": {},
     "requirements": [],
     "short": "Upload and copy custom Discord emojis.",
