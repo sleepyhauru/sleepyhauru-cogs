@@ -90,7 +90,7 @@ class VoiceLogTest(unittest.IsolatedAsyncioTestCase):
 
         target_before = types.SimpleNamespace(channel=shared_channel)
         target_after = types.SimpleNamespace(channel=shared_channel)
-        self.cog.last_move_at[member.id] = self.cog._utcnow() - timedelta(seconds=20)
+        self.cog.last_move_at[(guild.id, member.id)] = self.cog._utcnow() - timedelta(seconds=20)
         target_after.channel = shared_channel
         target_before.channel = types.SimpleNamespace(**shared_channel.__dict__)
         target_before.channel.id = 77
@@ -111,7 +111,7 @@ class VoiceLogTest(unittest.IsolatedAsyncioTestCase):
 
         joined_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
         leave_at = joined_at + timedelta(minutes=2, seconds=5)
-        self.cog.session_starts[member.id] = joined_at
+        self.cog.session_starts[(guild.id, member.id)] = joined_at
 
         self.cog._utcnow = lambda: leave_at
         await self.cog.on_voice_state_update(
@@ -147,7 +147,7 @@ class VoiceLogTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(sent, [])
-        self.assertIn(member.id, self.cog.session_starts)
+        self.assertIn((guild.id, member.id), self.cog.session_starts)
 
     async def test_on_voice_state_update_applies_move_cooldown(self):
         sent = []
@@ -157,7 +157,7 @@ class VoiceLogTest(unittest.IsolatedAsyncioTestCase):
         member = self._make_member(guild)
         now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
         self.cog._utcnow = lambda: now
-        self.cog.last_move_at[member.id] = now - timedelta(seconds=2)
+        self.cog.last_move_at[(guild.id, member.id)] = now - timedelta(seconds=2)
 
         await self.cog.on_voice_state_update(
             member,
@@ -173,7 +173,7 @@ class VoiceLogTest(unittest.IsolatedAsyncioTestCase):
         broken = self._make_channel(guild, "#broken", sent, channel_id=1, fails=True)
         healthy = self._make_channel(guild, "#healthy", sent, channel_id=2)
         member = self._make_member(guild)
-        self.cog.last_move_at[member.id] = self.cog._utcnow() - timedelta(seconds=20)
+        self.cog.last_move_at[(guild.id, member.id)] = self.cog._utcnow() - timedelta(seconds=20)
 
         await self.cog.on_voice_state_update(
             member,

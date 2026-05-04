@@ -3,9 +3,8 @@ import io
 import math
 import mimetypes
 import os
-import random
+import secrets
 import shutil
-import string
 from pathlib import Path
 from typing import Literal, Optional, cast
 
@@ -252,9 +251,30 @@ class AddImage(commands.Cog):
         return background
 
     def _generate_storage_filename(self, original_filename: str) -> str:
-        seed = "".join(random.sample(string.ascii_uppercase + string.digits, k=5))
+        seed = secrets.token_hex(6).upper()
         suffix = self._safe_storage_extension(original_filename)
         return f"{seed}{suffix}"
+
+    async def _send_saved_file(self, channel, directory: Path, image: dict) -> bool:
+        try:
+            path = directory / image["file_loc"]
+            file = discord.File(path)
+            await channel.send(files=[file])
+            return True
+        except (discord.DiscordException, FileNotFoundError, OSError):
+            log.error("Error sending image %s", image["file_loc"], exc_info=True)
+            return False
+
+    async def _increment_image_use(self, images_value, command_name: str) -> None:
+        async with images_value() as stored_images:
+            for index, stored_image in enumerate(stored_images):
+                if stored_image.get("command_name") != command_name:
+                    continue
+                updated = dict(stored_image)
+                updated["count"] = updated.get("count", 0) + 1
+                stored_images.pop(index)
+                stored_images.append(updated)
+                return
 
     async def validate_attachment(self, attachment: discord.Attachment) -> Optional[str]:
         suffix = Path(attachment.filename).suffix.lower()
@@ -370,31 +390,17 @@ class AddImage(commands.Cog):
         if alias in [x["command_name"] for x in guild_images]:
             await channel.typing()
             image = await self.get_image(alias, guild)
-            async with self.config.guild(guild).images() as stored_guild_images:
-                stored_guild_images.remove(image)
-                image["count"] += 1
-                stored_guild_images.append(image)
-            path = str(cog_data_path(self)) + f"/{guild.id}/" + image["file_loc"]
-            file = discord.File(path)
-            try:
-                await channel.send(files=[file])
-            except discord.errors.Forbidden:
-                log.error("Error sending image")
+            sent = await self._send_saved_file(channel, cog_data_path(self) / str(guild.id), image)
+            if sent:
+                await self._increment_image_use(self.config.guild(guild).images, alias)
             return
 
         if alias in [x["command_name"] for x in await self.config.images()] and not ignore_global:
             await channel.typing()
             image = await self.get_image(alias)
-            async with self.config.images() as list_images:
-                list_images.remove(image)
-                image["count"] += 1
-                list_images.append(image)
-            path = str(cog_data_path(self)) + "/global/" + image["file_loc"]
-            file = discord.File(path)
-            try:
-                await channel.send(files=[file])
-            except discord.errors.Forbidden:
-                log.error("Error sending image")
+            sent = await self._send_saved_file(channel, cog_data_path(self) / "global", image)
+            if sent:
+                await self._increment_image_use(self.config.images, alias)
 
     async def check_command_exists(self, command: str, guild: discord.Guild) -> bool:
         command = command.lower()
@@ -609,6 +615,10 @@ class AddImage(commands.Cog):
             return
 
         path = await self.get_image_path(image, source_guild)
+        if not path.is_file():
+            await ctx.send(f"The saved file for `{name}` is missing.")
+            return
+
         embed = discord.Embed(title=image["command_name"], timestamp=ctx.message.created_at)
         embed.add_field(name="Author", value=f"<@{image['author']}>")
         embed.add_field(name="Uses", value=str(image["count"]))
@@ -786,7 +796,6 @@ class AddImage(commands.Cog):
     async def save_image_location(
         self, msg: discord.Message, name: str, guild: Optional[discord.Guild] = None
     ) -> None:
-        filename = self._generate_storage_filename(msg.attachments[0].filename)
         if guild is not None:
             directory = await self.get_directory(guild)
             cur_images = await self.config.guild(guild).images()
@@ -795,6 +804,16 @@ class AddImage(commands.Cog):
             cur_images = await self.config.images()
         await self.make_guild_folder(directory)
         name = name.lower()
+
+        filename = ""
+        file_path = directory
+        for _ in range(10):
+            filename = self._generate_storage_filename(msg.attachments[0].filename)
+            file_path = directory / filename
+            if not file_path.exists():
+                break
+        else:
+            raise FileExistsError("Could not generate a unique storage filename.")
 
         file_path = directory / filename
 
@@ -805,12 +824,58 @@ class AddImage(commands.Cog):
             "author": msg.author.id,
         }
 
-        cur_images.append(new_entry)
         await msg.attachments[0].save(file_path)
+        cur_images = list(cur_images)
+        cur_images.append(new_entry)
         if guild is not None:
             await self.config.guild(guild).images.set(cur_images)
         else:
             await self.config.images.set(cur_images)
+
+    async def _save_image_or_report(
+        self,
+        ctx: commands.Context,
+        msg: discord.Message,
+        name: str,
+        guild: Optional[discord.Guild] = None,
+    ) -> bool:
+        try:
+            await self.save_image_location(msg, name, guild)
+            return True
+        except (discord.DiscordException, OSError, FileExistsError):
+            log.error("Error saving image %s", name, exc_info=True)
+            await ctx.send("I couldn't save that file.")
+            return False
+
+    async def _can_copy_from_source_guild(
+        self,
+        ctx: commands.Context,
+        source_guild: discord.Guild,
+    ) -> bool:
+        author = getattr(ctx, "author", None)
+        if author is None:
+            return False
+
+        is_owner = getattr(self.bot, "is_owner", None)
+        if is_owner is not None:
+            try:
+                owner_result = is_owner(author)
+                if hasattr(owner_result, "__await__"):
+                    owner_result = await owner_result
+                if owner_result:
+                    return True
+            except Exception:
+                pass
+
+        source_member = None
+        get_member = getattr(source_guild, "get_member", None)
+        if get_member is not None:
+            source_member = get_member(getattr(author, "id", None))
+        if source_member is None and source_guild == getattr(ctx, "guild", None):
+            source_member = author
+
+        permissions = getattr(source_member, "guild_permissions", None)
+        return bool(getattr(permissions, "manage_channels", False))
 
     async def copy_image_location(
         self,
@@ -883,13 +948,15 @@ class AddImage(commands.Cog):
             if error:
                 await ctx.send(error)
                 return
-            await self.save_image_location(file_msg, name, guild)
+            if not await self._save_image_or_report(ctx, file_msg, name, guild):
+                return
         else:
             error = await self.validate_attachment(ctx.message.attachments[0])
             if error:
                 await ctx.send(error)
                 return
-            await self.save_image_location(ctx.message, name, guild)
+            if not await self._save_image_or_report(ctx, ctx.message, name, guild):
+                return
         await ctx.send(name + " has been added to my files!")
 
     @addimage.command(name="copy", aliases=["transfer"])
@@ -918,6 +985,10 @@ class AddImage(commands.Cog):
 
         if await self.check_command_exists(target_name, destination_guild):
             await ctx.send(f"`{target_name}` is already in use in this server.")
+            return
+
+        if not await self._can_copy_from_source_guild(ctx, source_server):
+            await ctx.send("You need Manage Channels in the source server to copy its saved media.")
             return
 
         image = await self.get_image(name, source_server)
@@ -968,11 +1039,13 @@ class AddImage(commands.Cog):
             if error:
                 await ctx.send(error)
                 return
-            await self.save_image_location(file_msg, name)
+            if not await self._save_image_or_report(ctx, file_msg, name):
+                return
         else:
             error = await self.validate_attachment(ctx.message.attachments[0])
             if error:
                 await ctx.send(error)
                 return
-            await self.save_image_location(ctx.message, name)
+            if not await self._save_image_or_report(ctx, ctx.message, name):
+                return
         await ctx.send(name + " has been added to my files!")

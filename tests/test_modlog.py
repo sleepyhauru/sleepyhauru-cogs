@@ -391,6 +391,26 @@ class ModLogTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.fields[2].value, "2")
         self.assertEqual(embed.footer, "Message ID: 555")
 
+    async def test_on_message_does_not_cache_when_guild_logging_is_disabled(self):
+        guild = types.SimpleNamespace(id=67)
+        channel = types.SimpleNamespace(id=323, name="general")
+        author = types.SimpleNamespace(id=95, name="User", display_name="User", bot=False)
+        message = types.SimpleNamespace(
+            id=557,
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="private until enabled",
+            attachments=[],
+            embeds=[],
+            stickers=[],
+            jump_url=None,
+        )
+
+        await self.cog.on_message(message)
+
+        self.assertEqual(self.cog._message_cache, {})
+
     async def test_on_message_delete_logs_embed_only_messages(self):
         sent_embeds = []
 

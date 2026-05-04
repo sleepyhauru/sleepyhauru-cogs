@@ -63,6 +63,17 @@ class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(str(cm.exception), "That image URL is not allowed.")
 
+    async def test_assert_safe_remote_url_rejects_invalid_port(self):
+        async def fake_resolve(hostname, port):
+            raise AssertionError("Invalid URL ports should fail before DNS resolution.")
+
+        self.cog._resolve_hostname_addresses = fake_resolve
+
+        with self.assertRaises(deepfry_module.ImageFindError) as cm:
+            await self.cog._assert_safe_remote_url("https://example.com:notaport/image.png")
+
+        self.assertEqual(str(cm.exception), "That image URL is invalid.")
+
     async def test_assert_safe_remote_url_rejects_hostnames_resolving_to_private_ips(self):
         async def fake_resolve(hostname, port):
             self.assertEqual((hostname, port), ("example.com", 443))
@@ -83,6 +94,54 @@ class DeepfryHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.cog._resolve_hostname_addresses = fake_resolve
 
         await self.cog._assert_safe_remote_url("https://example.com/image.png")
+
+    async def test_read_url_bytes_revalidates_redirect_targets(self):
+        class FakeResponse:
+            def __init__(self, status, headers=None, body=b""):
+                self.status = status
+                self.headers = headers or {}
+                self._body = body
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def raise_for_status(self):
+                return None
+
+            async def read(self):
+                return self._body
+
+        class FakeSession:
+            closed = False
+
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return {
+                    "https://example.com/image.png": FakeResponse(
+                        302,
+                        headers={"Location": "http://127.0.0.1/private.png"},
+                    )
+                }[url]
+
+        async def fake_resolve(hostname, port):
+            self.assertEqual(hostname, "example.com")
+            return {"93.184.216.34"}
+
+        session = FakeSession()
+        self.cog.session = session
+        self.cog._resolve_hostname_addresses = fake_resolve
+
+        with self.assertRaises(deepfry_module.ImageFindError) as cm:
+            await self.cog._read_url_bytes("https://example.com/image.png", 100)
+
+        self.assertEqual(str(cm.exception), "That image URL is not allowed.")
+        self.assertEqual(len(session.calls), 1)
 
     async def test_resolve_target_uses_reply_attachment_before_history(self):
         class ReplyOnlyValue:

@@ -1,3 +1,4 @@
+import codecs
 import json
 import random
 import re
@@ -301,21 +302,39 @@ class Kagi(commands.Cog):
     async def _collect_stream_text(self, resp) -> str:
         parts = []
 
-        async for raw_line in resp.content:
-            line = raw_line.decode("utf-8", errors="ignore").strip()
+        def handle_line(line: str) -> bool:
+            line = line.strip()
             if not line or not line.startswith("data: "):
-                continue
+                return False
 
             try:
                 event = json.loads(line[6:])
             except json.JSONDecodeError:
-                continue
+                return False
 
             if "delta" in event:
                 parts.append(event["delta"])
 
-            if event.get("done") is True:
+            return event.get("done") is True
+
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+        buffer = ""
+        done = False
+        async for raw_line in resp.content:
+            buffer += decoder.decode(raw_line)
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                if handle_line(line):
+                    buffer = ""
+                    done = True
+                    break
+            if done:
                 break
+
+        if not done:
+            buffer += decoder.decode(b"", final=True)
+            if buffer:
+                handle_line(buffer)
 
         final_text = "".join(parts).strip()
         final_text = self._fix_mojibake(final_text)

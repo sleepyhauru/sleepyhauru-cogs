@@ -46,6 +46,13 @@ class GuildAssetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cog._get_export_dir(123, "20250101T000000Z"), older)
         self.assertEqual(self.cog._get_export_dir(123, "missing"), None)
 
+    def test_get_export_dir_rejects_path_traversal_timestamps(self):
+        root = self.cog._guild_export_root(123)
+        (root / "20250101T000000Z").mkdir(parents=True)
+
+        self.assertIsNone(self.cog._get_export_dir(123, "../20250101T000000Z"))
+        self.assertIsNone(self.cog._get_export_dir(123, "20250101T000000Z/.."))
+
     async def test_guildassets_group_shows_export_summary(self):
         root = self.cog._guild_export_root(321)
         (root / "20260101T000000Z").mkdir(parents=True)

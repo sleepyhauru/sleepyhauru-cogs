@@ -22,6 +22,7 @@ FETCH_FAIL = "Couldn't fetch the 7TV emote asset."
 FETCH_FAIL_TOO_LARGE = "The 7TV emote exists, but no asset fit within Discord's 256 KiB emoji limit."
 FETCH_FAIL_WEBP = "The 7TV emote was only available as WEBP, and conversion to a Discord-safe format failed."
 INFO_FAIL = "Couldn't load 7TV emote details."
+UPLOAD_NOT_ALLOWED = "You need Manage Emojis and Stickers to upload 7TV emotes."
 
 
 ID_PATTERNS = (
@@ -60,6 +61,31 @@ def _extract_meta_fields(data: Optional[Dict[str, Any]]) -> Tuple[Optional[str],
     if not isinstance(data, dict):
         return None, None
     return data.get("name"), data.get("animated")
+
+
+async def _read_asset_response(resp, limit: int = DISCORD_EMOJI_SIZE_LIMIT) -> Optional[bytes]:
+    content_length = resp.headers.get("Content-Length") if hasattr(resp, "headers") else None
+    if content_length:
+        try:
+            if int(content_length) > limit:
+                return None
+        except ValueError:
+            return None
+
+    content = getattr(resp, "content", None)
+    iter_chunked = getattr(content, "iter_chunked", None)
+    if not callable(iter_chunked):
+        data = await resp.read()
+        return data if len(data) <= limit else None
+
+    chunks = []
+    total = 0
+    async for chunk in iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _fetch_7tv_v3_emote(session: aiohttp.ClientSession, emote_id: str) -> Optional[Dict[str, Any]]:
@@ -162,10 +188,10 @@ async def _fetch_7tv_asset_via_meta(
             async with session.get(url, headers=HEADERS) as resp:
                 if resp.status != 200:
                     continue
-                data_bytes = await resp.read()
+                data_bytes = await _read_asset_response(resp)
         except aiohttp.ClientError:
             continue
-        if len(data_bytes) > DISCORD_EMOJI_SIZE_LIMIT:
+        if data_bytes is None:
             saw_oversized = True
             continue
         return AssetResult(data_bytes, (fmt == "GIF"), fmt.lower())
@@ -198,9 +224,8 @@ async def _fetch_7tv_bytes(
                 async with session.get(url, headers=HEADERS) as resp:
                     if resp.status != 200:
                         continue
-                    data = await resp.read()
-                    # Discord custom emoji limit is 256 KiB
-                    if len(data) > DISCORD_EMOJI_SIZE_LIMIT:
+                    data = await _read_asset_response(resp)
+                    if data is None:
                         saw_oversized = True
                         continue
                     return AssetResult(data, (ext == "gif"), ext)
@@ -234,6 +259,25 @@ class SevenTV(commands.Cog):
         if self.session is None or getattr(self.session, "closed", False):
             self.session = aiohttp.ClientSession()
         return self.session
+
+    async def _can_upload_emojis(self, ctx: commands.Context) -> bool:
+        author = getattr(ctx, "author", None)
+        if author is None:
+            return False
+
+        is_owner = getattr(self.bot, "is_owner", None)
+        if is_owner is not None:
+            owner_result = is_owner(author)
+            if hasattr(owner_result, "__await__"):
+                owner_result = await owner_result
+            if owner_result:
+                return True
+
+        permissions = getattr(author, "guild_permissions", None)
+        return bool(
+            getattr(permissions, "manage_emojis", False)
+            or getattr(permissions, "manage_emojis_and_stickers", False)
+        )
 
     def _resolve_emoji_name(self, guild: discord.Guild, requested_name: Optional[str], api_name: Optional[str]) -> str:
         base_name = _sanitize_name(requested_name) or _sanitize_name(api_name) or "seventv_emoji"
@@ -305,6 +349,8 @@ class SevenTV(commands.Cog):
         Example: [p]7tv https://7tv.app/emotes/<id> optional_name
         """
         assert ctx.guild
+        if not await self._can_upload_emojis(ctx):
+            return await ctx.send(UPLOAD_NOT_ALLOWED)
 
         emote_id = _extract_7tv_id(link)
         if not emote_id:

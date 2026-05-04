@@ -15,8 +15,8 @@ class VoiceLog(commands.Cog):
         super().__init__()
         self.bot = bot
         self.allowed_guild_ids: Set[int] = set()
-        self.session_starts: Dict[int, datetime] = {}
-        self.last_move_at: Dict[int, datetime] = {}
+        self.session_starts: Dict[tuple[int, int], datetime] = {}
+        self.last_move_at: Dict[tuple[int, int], datetime] = {}
         self.config = Config.get_conf(self, identifier=7669636567)
         self.config.register_guild(
             enabled=False,
@@ -85,7 +85,14 @@ class VoiceLog(commands.Cog):
             parts.append(f"{seconds}s")
         return " ".join(parts)
 
-    def _should_log_event(self, before_channel, after_channel, settings: dict, now: datetime, member_id: int) -> bool:
+    def _should_log_event(
+        self,
+        before_channel,
+        after_channel,
+        settings: dict,
+        now: datetime,
+        member_key: tuple[int, int],
+    ) -> bool:
         if before_channel is None and after_channel is not None:
             return settings["log_joins"]
         if before_channel is not None and after_channel is None:
@@ -93,7 +100,7 @@ class VoiceLog(commands.Cog):
         if before_channel is not None and after_channel is not None:
             if not settings["log_moves"]:
                 return False
-            last_move_at = self.last_move_at.get(member_id)
+            last_move_at = self.last_move_at.get(member_key)
             if last_move_at is not None:
                 cooldown = timedelta(seconds=settings["move_cooldown_seconds"])
                 if now - last_move_at < cooldown:
@@ -107,6 +114,7 @@ class VoiceLog(commands.Cog):
         before_channel,
         after_channel,
         now: datetime,
+        member_key: tuple[int, int],
     ) -> discord.Embed:
         embed = discord.Embed(color=member.color, timestamp=now)
         if before_channel is None:
@@ -117,7 +125,7 @@ class VoiceLog(commands.Cog):
         if after_channel is None:
             embed.set_author(name="Disconnected", icon_url=member.display_avatar.url)
             embed.description = f"{member.mention} has left {before_channel.mention}"
-            duration = self._format_duration(self.session_starts.pop(member.id, None), now)
+            duration = self._format_duration(self.session_starts.pop(member_key, None), now)
             if duration:
                 embed.set_footer(text=f"Session length: {duration}")
             return embed
@@ -168,19 +176,20 @@ class VoiceLog(commands.Cog):
 
         settings = await self._get_guild_settings(guild)
         now = self._utcnow()
-        if not self._should_log_event(before.channel, after.channel, settings, now, member.id):
+        member_key = (guild.id, member.id)
+        if not self._should_log_event(before.channel, after.channel, settings, now, member_key):
             if before.channel is None and after.channel is not None:
-                self.session_starts[member.id] = now
+                self.session_starts[member_key] = now
             return
 
         if before.channel is None and after.channel is not None:
-            self.session_starts[member.id] = now
+            self.session_starts[member_key] = now
         elif before.channel is not None and after.channel is not None:
-            self.last_move_at[member.id] = now
+            self.last_move_at[member_key] = now
         elif after.channel is None:
-            self.last_move_at.pop(member.id, None)
+            self.last_move_at.pop(member_key, None)
 
-        embed = self._build_voice_embed(member, before.channel, after.channel, now)
+        embed = self._build_voice_embed(member, before.channel, after.channel, now, member_key)
         targets = self._get_target_channels(before.channel, after.channel)
         await self._send_to_channels(targets, embed)
 

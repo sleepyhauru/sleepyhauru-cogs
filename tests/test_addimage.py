@@ -430,6 +430,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
     async def test_copy_image_location_copies_file_and_resets_count(self):
         source_guild = types.SimpleNamespace(id=222, name="Source")
         destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        source_guild.get_member = lambda user_id: self._author(user_id=user_id, manage_channels=True)
         source_dir = self.tmp_root / str(source_guild.id)
         destination_dir = self.tmp_root / str(destination_guild.id)
         shutil.rmtree(source_dir, ignore_errors=True)
@@ -458,6 +459,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         source_guild = types.SimpleNamespace(id=222, name="Source")
         destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        source_guild.get_member = lambda user_id: self._author(user_id=user_id, manage_channels=True)
         await self.cog.config.guild(source_guild).images.set(
             [{"command_name": "cat", "count": 4, "file_loc": "origin.png", "author": 7}]
         )
@@ -490,6 +492,7 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         source_guild = types.SimpleNamespace(id=222, name="Source")
         destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        source_guild.get_member = lambda user_id: self._author(user_id=user_id, manage_channels=True)
         await self.cog.config.guild(source_guild).images.set(
             [{"command_name": "cat", "count": 4, "file_loc": "origin.png", "author": 7}]
         )
@@ -513,6 +516,37 @@ class AddImageHelpersTest(unittest.IsolatedAsyncioTestCase):
                 "Run `addimage clean_deleted_images` there first."
             ],
         )
+
+    async def test_copy_image_guild_requires_source_guild_permission(self):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        source_guild = types.SimpleNamespace(id=222, name="Source")
+        destination_guild = types.SimpleNamespace(id=333, name="Destination")
+        source_guild.get_member = lambda user_id: self._author(user_id=user_id, manage_channels=False)
+        ctx = types.SimpleNamespace(
+            guild=destination_guild,
+            author=self._author(user_id=7, manage_channels=True),
+            send=send,
+        )
+
+        await self.cog.copy_image_guild(ctx, source_guild, "cat")
+
+        self.assertEqual(
+            sent,
+            ["You need Manage Channels in the source server to copy its saved media."],
+        )
+
+    async def test_copy_permission_uses_current_author_when_member_cache_misses(self):
+        self.guild.get_member = lambda user_id: None
+        ctx = types.SimpleNamespace(
+            guild=self.guild,
+            author=self._author(user_id=7, manage_channels=True),
+        )
+
+        self.assertTrue(await self.cog._can_copy_from_source_guild(ctx, self.guild))
 
 
 if __name__ == "__main__":

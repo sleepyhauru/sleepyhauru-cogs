@@ -196,6 +196,23 @@ class CommandsCogAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.cog.config.excluded_cogs(), ["Alias"])
         self.assertEqual(sent, ["Added `Misc` to the allowlist and removed it from exclusions."])
 
+    async def test_contextual_command_lines_respect_can_run(self):
+        visible = FakeCommand("visible", cog_name="Utility", short_doc="Shown")
+        blocked = FakeCommand("blocked", cog_name="Utility", short_doc="Hidden")
+
+        async def blocked_can_run(ctx):
+            return False
+
+        blocked.can_run = blocked_can_run
+        cog = commands_module.Commands(types.SimpleNamespace(commands=[visible, blocked]))
+        ctx = types.SimpleNamespace()
+
+        lines = await cog._build_cog_lines_for_context("!", "Utility", ctx)
+        available = await cog._available_cogs("!", ctx)
+
+        self.assertEqual(lines, ["**`!visible`** — Shown"])
+        self.assertEqual(available, ["Utility"])
+
 
 if __name__ == "__main__":
     unittest.main()

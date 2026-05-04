@@ -22,6 +22,7 @@ EMOJI_UPLOAD_DELAY = 1.5
 EMOJI_UPLOAD_MAX_RETRIES = 3
 EMOJI_UPLOAD_RETRY_BASE = 3.0
 IMPORT_PROGRESS_EVERY = 5
+EXPORT_TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
 
 
 class GuildAssets(commands.Cog):
@@ -115,8 +116,15 @@ class GuildAssets(commands.Cog):
     def _get_export_dir(self, guild_id: int, timestamp: Optional[str] = None) -> Optional[Path]:
         if timestamp is None:
             return self._latest_export_dir(guild_id)
+        if not EXPORT_TIMESTAMP_RE.fullmatch(timestamp):
+            return None
 
-        candidate = self._guild_export_root(guild_id) / timestamp
+        root = self._guild_export_root(guild_id)
+        candidate = root / timestamp
+        try:
+            candidate.resolve().relative_to(root.resolve())
+        except ValueError:
+            return None
         if candidate.is_dir():
             return candidate
         return None

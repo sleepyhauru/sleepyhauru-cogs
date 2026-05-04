@@ -1,7 +1,9 @@
+import inspect
+from typing import Dict, List, Optional, Set
+
 import discord
 from discord.ui import Select, View
 from redbot.core import Config, commands
-from typing import List, Optional, Set
 
 DEFAULT_EXCLUDED_COGS = ["Alias", "Audio", "Commands", "Core", "Dev", "Downloader", "Help"]
 MAX_SELECT_OPTIONS = 25
@@ -36,16 +38,28 @@ class CommandsMenuSelect(Select):
             return
 
         cog_name = self.values[0]
-        embed = view.cog.build_cog_embed(view.prefix, cog_name)
+        embed = view.cog.build_cog_embed_from_lines(
+            view.prefix,
+            cog_name,
+            view.visible_lines_by_cog.get(cog_name),
+        )
         await interaction.response.edit_message(embed=embed, view=view)
 
 
 class CommandsMenuView(View):
-    def __init__(self, cog, author_id: int, prefix: str, cog_names: List[str]):
+    def __init__(
+        self,
+        cog,
+        author_id: int,
+        prefix: str,
+        cog_names: List[str],
+        visible_lines_by_cog: Optional[Dict[str, List[str]]] = None,
+    ):
         super().__init__(timeout=180)
         self.cog = cog
         self.author_id = author_id
         self.prefix = prefix
+        self.visible_lines_by_cog = visible_lines_by_cog or {}
         self.message: Optional[discord.Message] = None
         chunks = [cog_names[i : i + MAX_SELECT_OPTIONS] for i in range(0, len(cog_names), MAX_SELECT_OPTIONS)]
         total = len(chunks)
@@ -99,6 +113,39 @@ class Commands(commands.Cog):
             cmds.append(cmd)
         return sorted(cmds, key=lambda c: c.name.lower())
 
+    async def _can_show_command(self, ctx: commands.Context, command: commands.Command) -> bool:
+        if getattr(command, "hidden", False):
+            return False
+
+        for attr in ("can_see", "can_run"):
+            checker = getattr(command, attr, None)
+            if checker is None:
+                continue
+            try:
+                result = checker(ctx)
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception:
+                return False
+            if not result:
+                return False
+
+        return True
+
+    async def _visible_root_commands_for_cog_for_context(
+        self, cog_name: str, ctx: commands.Context
+    ) -> List[commands.Command]:
+        cmds = []
+        for cmd in self.bot.commands:
+            if getattr(cmd, "cog_name", None) != cog_name:
+                continue
+            if getattr(cmd, "parent", None) is not None:
+                continue
+            if not await self._can_show_command(ctx, cmd):
+                continue
+            cmds.append(cmd)
+        return sorted(cmds, key=lambda c: c.name.lower())
+
     def _walk_visible_subcommands(self, command: commands.Command) -> List[commands.Command]:
         found = []
         if isinstance(command, commands.Group):
@@ -108,6 +155,19 @@ class Commands(commands.Cog):
                 found.append(sub)
                 if isinstance(sub, commands.Group):
                     found.extend(self._walk_visible_subcommands(sub))
+        return found
+
+    async def _walk_visible_subcommands_for_context(
+        self, command: commands.Command, ctx: commands.Context
+    ) -> List[commands.Command]:
+        found = []
+        if isinstance(command, commands.Group):
+            for sub in sorted(command.commands, key=lambda c: c.name.lower()):
+                if not await self._can_show_command(ctx, sub):
+                    continue
+                found.append(sub)
+                if isinstance(sub, commands.Group):
+                    found.extend(await self._walk_visible_subcommands_for_context(sub, ctx))
         return found
 
     def _command_usage(self, prefix: str, command: commands.Command) -> str:
@@ -145,19 +205,50 @@ class Commands(commands.Cog):
 
         return lines
 
-    async def _available_cogs(self, prefix: str) -> List[str]:
+    async def _build_cog_lines_for_context(
+        self, prefix: str, cog_name: str, ctx: commands.Context
+    ) -> List[str]:
+        lines: List[str] = []
+        seen: Set[str] = set()
+
+        root_commands = await self._visible_root_commands_for_cog_for_context(cog_name, ctx)
+
+        for root in root_commands:
+            all_commands = [root] + await self._walk_visible_subcommands_for_context(root, ctx)
+
+            for cmd in all_commands:
+                if cmd.qualified_name in seen:
+                    continue
+
+                seen.add(cmd.qualified_name)
+                lines.append(self._format_command_line(prefix, cmd))
+
+        return lines
+
+    async def _available_cogs(self, prefix: str, ctx: Optional[commands.Context] = None) -> List[str]:
         allowlist = await self.config.allowlist()
         excluded = set(await self.config.excluded_cogs())
 
         if allowlist:
-            names = [cog_name for cog_name in allowlist if self._build_cog_lines(prefix, cog_name)]
+            names = []
+            for cog_name in allowlist:
+                if ctx is None:
+                    lines = self._build_cog_lines(prefix, cog_name)
+                else:
+                    lines = await self._build_cog_lines_for_context(prefix, cog_name, ctx)
+                if lines:
+                    names.append(cog_name)
             return names
 
         names = []
         for cog_name in self._known_cog_names():
             if cog_name in excluded:
                 continue
-            if self._build_cog_lines(prefix, cog_name):
+            if ctx is None:
+                lines = self._build_cog_lines(prefix, cog_name)
+            else:
+                lines = await self._build_cog_lines_for_context(prefix, cog_name, ctx)
+            if lines:
                 names.append(cog_name)
         return names
 
@@ -182,8 +273,43 @@ class Commands(commands.Cog):
         embed.set_footer(text="Choose a cog from the dropdown menu.")
         return embed
 
+    def build_home_embed_from_lines(
+        self,
+        prefix: str,
+        cog_names: List[str],
+        visible_lines_by_cog: Dict[str, List[str]],
+    ) -> discord.Embed:
+        lines = []
+
+        for cog_name in cog_names:
+            command_count = len(visible_lines_by_cog.get(cog_name, []))
+            lines.append(f"**{cog_name}** — {command_count} command{'s' if command_count != 1 else ''}")
+
+        description = (
+            f"Use `{prefix}help <command>` for detailed help.\n\n"
+            f"Select a category from the dropdown menu below.\n\n"
+            f"{chr(10).join(lines) if lines else 'No command categories available.'}"
+        )
+
+        embed = discord.Embed(
+            title="Bot Commands",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Choose a cog from the dropdown menu.")
+        return embed
+
     def build_cog_embed(self, prefix: str, cog_name: str) -> discord.Embed:
-        lines = self._build_cog_lines(prefix, cog_name)
+        return self.build_cog_embed_from_lines(prefix, cog_name)
+
+    def build_cog_embed_from_lines(
+        self,
+        prefix: str,
+        cog_name: str,
+        lines: Optional[List[str]] = None,
+    ) -> discord.Embed:
+        if lines is None:
+            lines = self._build_cog_lines(prefix, cog_name)
 
         if not lines:
             description = "No commands detected."
@@ -214,8 +340,12 @@ class Commands(commands.Cog):
     async def commands_menu(self, ctx: commands.Context):
         """Show the command list."""
         prefix = ctx.clean_prefix
-        available_cogs = await self._available_cogs(prefix)
-        embed = self.build_home_embed(prefix, available_cogs)
+        available_cogs = await self._available_cogs(prefix, ctx)
+        visible_lines_by_cog = {
+            cog_name: await self._build_cog_lines_for_context(prefix, cog_name, ctx)
+            for cog_name in available_cogs
+        }
+        embed = self.build_home_embed_from_lines(prefix, available_cogs, visible_lines_by_cog)
 
         if not available_cogs:
             await ctx.send(embed=embed)
@@ -226,6 +356,7 @@ class Commands(commands.Cog):
             author_id=ctx.author.id,
             prefix=prefix,
             cog_names=available_cogs,
+            visible_lines_by_cog=visible_lines_by_cog,
         )
         view.message = await ctx.send(embed=embed, view=view)
 

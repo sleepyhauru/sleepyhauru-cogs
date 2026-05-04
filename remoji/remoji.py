@@ -162,6 +162,24 @@ class Remoji(commands.Cog):
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
+    async def _read_response_under_limit(self, resp) -> tuple[Optional[bytes], Optional[str]]:
+        content = getattr(resp, "content", None)
+        iter_chunked = getattr(content, "iter_chunked", None)
+        if not callable(iter_chunked):
+            data = await resp.read()
+            if len(data) > DISCORD_EMOJI_SIZE_LIMIT:
+                return None, IMAGE_TOO_LARGE
+            return data, None
+
+        chunks = []
+        total = 0
+        async for chunk in iter_chunked(64 * 1024):
+            total += len(chunk)
+            if total > DISCORD_EMOJI_SIZE_LIMIT:
+                return None, IMAGE_TOO_LARGE
+            chunks.append(chunk)
+        return b"".join(chunks), None
+
     async def _download_image_url(self, url: str) -> ImageDownload:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -183,12 +201,12 @@ class Remoji(commands.Cog):
                 if content_length and int(content_length) > DISCORD_EMOJI_SIZE_LIMIT:
                     return ImageDownload(None, IMAGE_TOO_LARGE)
 
-                data = await resp.read()
+                data, error = await self._read_response_under_limit(resp)
+                if error:
+                    return ImageDownload(None, error)
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
             return ImageDownload(None, f"{DOWNLOAD_FAILED} {type(error).__name__}: {error}")
 
-        if len(data) > DISCORD_EMOJI_SIZE_LIMIT:
-            return ImageDownload(None, IMAGE_TOO_LARGE)
         return ImageDownload(data, content_type=content_type or None)
 
     async def _download_emoji(self, emoji: EmojiAsset) -> ImageDownload:

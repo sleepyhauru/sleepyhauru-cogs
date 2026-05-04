@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import random
 import re
@@ -19,6 +20,7 @@ class NoFuckYou(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.last_response_at = {}
+        self.counter_locks = {}
         self.config = Config.get_conf(self, identifier=661027401, force_registration=True)
         self.config.register_guild(
             enabled=False,
@@ -63,9 +65,12 @@ class NoFuckYou(commands.Cog):
         self.last_response_at[channel_id] = self._now()
 
     async def _increment_guild_counter(self, guild, key: str):
-        conf_value = getattr(self.config.guild(guild), key)
-        current = await conf_value()
-        await conf_value.set(current + 1)
+        guild_id = getattr(guild, "id", id(guild))
+        lock = self.counter_locks.setdefault((guild_id, key), asyncio.Lock())
+        async with lock:
+            conf_value = getattr(self.config.guild(guild), key)
+            current = await conf_value()
+            await conf_value.set(current + 1)
 
     def _pick_response(self, thirsty_chance: float) -> str:
         if random.random() < thirsty_chance:

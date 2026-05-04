@@ -6,7 +6,7 @@ import socket
 from io import BytesIO
 from random import randint
 from typing import Optional, Tuple, Union
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import discord
@@ -20,6 +20,7 @@ MAX_DIMENSION = 3840
 MAX_PIXELS = 12_000_000
 MAX_FRAMES = 200
 HISTORY_LOOKBACK = 5
+MAX_REDIRECTS = 5
 
 try:
     RESAMPLE_BILINEAR = Image.Resampling.BILINEAR
@@ -143,13 +144,17 @@ class Deepfry(commands.Cog):
             raise ImageFindError("That image URL is not allowed.")
 
         try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            raise ImageFindError("That image URL is invalid.")
+
+        try:
             if self._is_private_network_address(hostname):
                 raise ImageFindError("That image URL is not allowed.")
             return
         except ValueError:
             pass
 
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
         try:
             addresses = await self._resolve_hostname_addresses(hostname, port)
         except OSError:
@@ -160,26 +165,58 @@ class Deepfry(commands.Cog):
         if any(self._is_private_network_address(address) for address in addresses):
             raise ImageFindError("That image URL is not allowed.")
 
+    async def _read_response_bytes(self, response, filesize_limit: int) -> bytes:
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > filesize_limit:
+                    raise ImageFindError("That image is too large.")
+            except ValueError:
+                raise ImageFindError("An image could not be downloaded. Make sure you provide a direct link.")
+
+        content = getattr(response, "content", None)
+        iter_chunked = getattr(content, "iter_chunked", None)
+        if callable(iter_chunked):
+            chunks = []
+            total = 0
+            async for chunk in iter_chunked(64 * 1024):
+                total += len(chunk)
+                if total > filesize_limit:
+                    raise ImageFindError("That image is too large.")
+                chunks.append(chunk)
+            return b"".join(chunks)
+
+        data = await response.read()
+        if len(data) > filesize_limit:
+            raise ImageFindError("That image is too large.")
+        return data
+
     async def _read_url_bytes(self, url: str, filesize_limit: int) -> bytes:
         if not self.session or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=30)
             self.session = aiohttp.ClientSession(timeout=timeout)
 
-        await self._assert_safe_remote_url(url)
-
         try:
-            async with self.session.get(url) as response:
-                response.raise_for_status()
+            current_url = url
+            for redirect_count in range(MAX_REDIRECTS + 1):
+                await self._assert_safe_remote_url(current_url)
+                async with self.session.get(current_url, allow_redirects=False) as response:
+                    status = getattr(response, "status", 200)
+                    if 300 <= status < 400:
+                        if redirect_count >= MAX_REDIRECTS:
+                            raise ImageFindError("That image URL redirected too many times.")
 
-                content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > filesize_limit:
-                    raise ImageFindError("That image is too large.")
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ImageFindError("That image URL redirected without a target.")
 
-                data = await response.read()
-                if len(data) > filesize_limit:
-                    raise ImageFindError("That image is too large.")
+                        current_url = urljoin(current_url, location)
+                        continue
 
-                return data
+                    response.raise_for_status()
+                    return await self._read_response_bytes(response, filesize_limit)
+
+            raise ImageFindError("That image URL redirected too many times.")
         except ImageFindError:
             raise
         except aiohttp.ClientError:

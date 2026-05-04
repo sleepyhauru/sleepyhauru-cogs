@@ -99,6 +99,65 @@ class KagiHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, ("a", "b"))
 
+    async def test_collect_stream_text_handles_split_sse_lines(self):
+        class FakeContent:
+            def __init__(self, chunks):
+                self.chunks = chunks
+
+            def __aiter__(self):
+                self._iter = iter(self.chunks)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+        resp = types.SimpleNamespace(
+            content=FakeContent(
+                [
+                    b'data: {"del',
+                    b'ta": "he"}\n',
+                    b'data: {"delta": "llo"}\n',
+                    b'data: {"done": true}\n',
+                ]
+            )
+        )
+
+        result = await self.cog._collect_stream_text(resp)
+
+        self.assertEqual(result, "hello")
+
+    async def test_collect_stream_text_preserves_split_utf8(self):
+        class FakeContent:
+            def __init__(self, chunks):
+                self.chunks = chunks
+
+            def __aiter__(self):
+                self._iter = iter(self.chunks)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iter)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+        resp = types.SimpleNamespace(
+            content=FakeContent(
+                [
+                    b'data: {"delta": "caf\xc3',
+                    b'\xa9"}\n',
+                    b'data: {"done": true}\n',
+                ]
+            )
+        )
+
+        result = await self.cog._collect_stream_text(resp)
+
+        self.assertEqual(result, "café")
+
     async def test_get_text_prefers_explicit_text(self):
         ctx = types.SimpleNamespace(message=types.SimpleNamespace(reference=None))
 

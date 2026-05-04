@@ -226,6 +226,7 @@ class EmbedFix(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.counter_locks = {}
         self.last_suppress_notice_at = {}
         self.suppress_retry_tasks = set()
         self.config = Config.get_conf(self, identifier=713902406551, force_registration=True)
@@ -479,9 +480,12 @@ class EmbedFix(commands.Cog):
         return bool(result)
 
     async def _increment_guild_counter(self, guild, key: str):
-        conf_value = getattr(self.config.guild(guild), key)
-        current = await conf_value()
-        await conf_value.set(current + 1)
+        guild_id = getattr(guild, "id", id(guild))
+        lock = self.counter_locks.setdefault((guild_id, key), asyncio.Lock())
+        async with lock:
+            conf_value = getattr(self.config.guild(guild), key)
+            current = await conf_value()
+            await conf_value.set(current + 1)
 
     async def _get_rules(self, guild) -> list[dict]:
         rules = await self.config.guild(guild).rules()

@@ -148,6 +148,14 @@ class ModLog(commands.Cog):
             result = await result
         return bool(result)
 
+    async def _should_cache_message(self, message) -> bool:
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            return False
+        if await self._is_disabled_in_guild(guild):
+            return False
+        return bool(await self.config.guild(guild).enabled())
+
     async def _get_log_channel(self, guild):
         conf = self.config.guild(guild)
         if not await conf.enabled():
@@ -496,7 +504,7 @@ class ModLog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if getattr(message, "guild", None) is None:
+        if not await self._should_cache_message(message):
             return
         self._store_message_snapshot(message)
 
@@ -597,7 +605,8 @@ class ModLog(commands.Cog):
         if getattr(author, "bot", False):
             return
 
-        self._store_message_snapshot(after)
+        if await self._should_cache_message(after):
+            self._store_message_snapshot(after)
 
         before_content = getattr(before, "content", None) or ""
         after_content = getattr(after, "content", None) or ""

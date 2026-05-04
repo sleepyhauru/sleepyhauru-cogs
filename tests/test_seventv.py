@@ -233,6 +233,10 @@ class SevenTVCommandTest(unittest.IsolatedAsyncioTestCase):
         ctx = types.SimpleNamespace(
             send=send,
             guild=guild,
+            author=types.SimpleNamespace(
+                id=42,
+                guild_permissions=types.SimpleNamespace(manage_emojis=True),
+            ),
             message=types.SimpleNamespace(add_reaction=add_reaction),
             typing=lambda: TypingContext(),
         )
@@ -245,6 +249,18 @@ class SevenTVCommandTest(unittest.IsolatedAsyncioTestCase):
         await cog.seven_tv(ctx, "https://example.com/not-7tv")
 
         self.assertEqual(sent, [seventv.INVALID_LINK])
+
+    async def test_seven_tv_rejects_user_without_upload_permission(self):
+        cog = seventv.SevenTV(bot=object())
+        ctx, sent, _ = self._make_ctx(guild=object())
+        ctx.author.guild_permissions = types.SimpleNamespace(
+            manage_emojis=False,
+            manage_emojis_and_stickers=False,
+        )
+
+        await cog.seven_tv(ctx, "https://7tv.app/emotes/01ARZ3NDEKTSV4RRFFQ69G5FAV")
+
+        self.assertEqual(sent, [seventv.UPLOAD_NOT_ALLOWED])
 
     async def test_seven_tv_uploads_and_suffixes_duplicate_name(self):
         emoji = types.SimpleNamespace(name="Wave_2")
