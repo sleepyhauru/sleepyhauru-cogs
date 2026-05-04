@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import re
 import time
@@ -15,7 +16,9 @@ RULE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.IGNORECASE)
 TRAILING_PUNCTUATION = ".,!?;:"
 MAX_LINKS_LIMIT = 10
 SUPPRESS_NOTICE_COOLDOWN_SECONDS = 600
-LEGACY_INSTAGRAM_TARGET_HOSTS = {"ddinstagram.com"}
+SUPPRESS_RETRY_DELAYS = (2.0, 8.0)
+INSTAGRAM_TARGET_HOST = "toinstagram.com"
+LEGACY_INSTAGRAM_TARGET_HOSTS = {"ddinstagram.com", "vxinstagram.com"}
 
 DEFAULT_RULES = (
     {
@@ -28,7 +31,7 @@ DEFAULT_RULES = (
         "name": "instagram",
         "enabled": True,
         "source_hosts": ["instagram.com"],
-        "target_host": "vxinstagram.com",
+        "target_host": INSTAGRAM_TARGET_HOST,
     },
     {
         "name": "tiktok",
@@ -202,6 +205,7 @@ class EmbedFix(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.last_suppress_notice_at = {}
+        self.suppress_retry_tasks = set()
         self.config = Config.get_conf(self, identifier=713902406551, force_registration=True)
         self.config.register_guild(
             enabled=False,
@@ -222,6 +226,11 @@ class EmbedFix(commands.Cog):
     async def red_delete_data_for_user(self, **kwargs):
         return
 
+    def cog_unload(self):
+        for task in self.suppress_retry_tasks:
+            task.cancel()
+        self.suppress_retry_tasks.clear()
+
     @staticmethod
     def _prefix(ctx: commands.Context) -> str:
         return getattr(ctx, "clean_prefix", "[p]")
@@ -232,6 +241,9 @@ class EmbedFix(commands.Cog):
 
     def _now(self) -> float:
         return time.monotonic()
+
+    async def _sleep(self, delay: float):
+        await asyncio.sleep(delay)
 
     def _channel_id(self, channel) -> int:
         return getattr(channel, "id", id(channel))
@@ -266,7 +278,7 @@ class EmbedFix(commands.Cog):
                 and source_hosts == ["instagram.com"]
                 and target_host in LEGACY_INSTAGRAM_TARGET_HOSTS
             ):
-                migrated_rule["target_host"] = "vxinstagram.com"
+                migrated_rule["target_host"] = INSTAGRAM_TARGET_HOST
                 changed = True
             migrated_rules.append(migrated_rule)
 
@@ -444,6 +456,52 @@ class EmbedFix(commands.Cog):
             )
         except discord.HTTPException:
             return
+
+    async def _suppress_message_embeds(
+        self,
+        message: discord.Message,
+        guild,
+        *,
+        warn_on_failure: bool,
+        count_success: bool,
+        count_error: bool,
+    ) -> bool:
+        try:
+            await message.edit(suppress=True)
+        except discord.NotFound:
+            if count_error:
+                await self._increment_guild_counter(guild, "suppress_error_count")
+            return False
+        except (discord.Forbidden, discord.HTTPException):
+            if count_error:
+                await self._increment_guild_counter(guild, "suppress_error_count")
+            if warn_on_failure:
+                await self._send_suppress_failure_notice(message)
+            return False
+
+        if count_success:
+            await self._increment_guild_counter(guild, "suppressed_count")
+        return True
+
+    async def _retry_suppress_message_embeds(self, message: discord.Message, guild):
+        try:
+            for delay in SUPPRESS_RETRY_DELAYS:
+                await self._sleep(delay)
+                await self._suppress_message_embeds(
+                    message,
+                    guild,
+                    warn_on_failure=False,
+                    count_success=False,
+                    count_error=False,
+                )
+        finally:
+            current_task = asyncio.current_task()
+            if current_task is not None:
+                self.suppress_retry_tasks.discard(current_task)
+
+    def _schedule_suppress_retries(self, message: discord.Message, guild):
+        task = asyncio.create_task(self._retry_suppress_message_embeds(message, guild))
+        self.suppress_retry_tasks.add(task)
 
     def _rules_message(self, rules: list[dict]) -> str:
         lines = ["EmbedFix rules"]
@@ -632,17 +690,17 @@ class EmbedFix(commands.Cog):
         if not await conf.suppress_original():
             return
 
-        try:
-            await message.edit(suppress=True)
-        except discord.NotFound:
-            await self._increment_guild_counter(guild, "suppress_error_count")
-            return
-        except (discord.Forbidden, discord.HTTPException):
-            await self._increment_guild_counter(guild, "suppress_error_count")
-            await self._send_suppress_failure_notice(message)
+        suppressed = await self._suppress_message_embeds(
+            message,
+            guild,
+            warn_on_failure=True,
+            count_success=True,
+            count_error=True,
+        )
+        if not suppressed:
             return
 
-        await self._increment_guild_counter(guild, "suppressed_count")
+        self._schedule_suppress_retries(message, guild)
 
     @commands.group(name="embedfix", aliases=["embedfixset"], invoke_without_command=True)
     @commands.has_permissions(manage_guild=True)

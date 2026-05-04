@@ -1,3 +1,4 @@
+import asyncio
 import types
 import unittest
 
@@ -46,7 +47,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.cog._rewrite_url("https://www.instagram.com/reel/abc/", rules),
-            "https://vxinstagram.com/reel/abc/",
+            "https://toinstagram.com/reel/abc/",
         )
         self.assertIsNone(self.cog._rewrite_url("https://example.com/path", rules))
 
@@ -60,7 +61,31 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         migrated = await self.cog._get_rules(guild)
 
         instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
-        self.assertEqual(instagram_rule["target_host"], "vxinstagram.com")
+        self.assertEqual(instagram_rule["target_host"], "toinstagram.com")
+
+    async def test_get_rules_migrates_vxinstagram_default_target(self):
+        guild = types.SimpleNamespace(id=34)
+        rules = self.cog._default_rules()
+        instagram_rule = next(rule for rule in rules if rule["name"] == "instagram")
+        instagram_rule["target_host"] = "vxinstagram.com"
+        await self.cog.config.guild(guild).rules.set(rules)
+
+        migrated = await self.cog._get_rules(guild)
+
+        instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
+        self.assertEqual(instagram_rule["target_host"], "toinstagram.com")
+
+    async def test_get_rules_preserves_custom_instagram_target(self):
+        guild = types.SimpleNamespace(id=35)
+        rules = self.cog._default_rules()
+        instagram_rule = next(rule for rule in rules if rule["name"] == "instagram")
+        instagram_rule["target_host"] = "kkinstagram.com"
+        await self.cog.config.guild(guild).rules.set(rules)
+
+        migrated = await self.cog._get_rules(guild)
+
+        instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
+        self.assertEqual(instagram_rule["target_host"], "kkinstagram.com")
 
     def test_extract_urls_trims_punctuation_and_skips_suppressed_links(self):
         urls = self.cog._extract_urls(
@@ -132,6 +157,65 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await conf.repost_count(), 1)
         self.assertEqual(await conf.suppressed_count(), 1)
 
+    async def test_listener_retries_suppression_after_delayed_embeds(self):
+        sent = []
+        edits = []
+        sleeps = []
+
+        async def send(message, allowed_mentions=None):
+            sent.append((message, allowed_mentions))
+
+        async def edit(**kwargs):
+            edits.append(kwargs)
+
+        async def sleep(delay):
+            sleeps.append(delay)
+
+        guild = types.SimpleNamespace(id=32)
+        await self._enable(guild.id)
+        self.cog._sleep = sleep
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False),
+            guild=guild,
+            content="https://twitter.com/user/status/123",
+            channel=types.SimpleNamespace(send=send),
+            edit=edit,
+        )
+
+        await self.cog.on_message_without_command(message)
+        tasks = list(self.cog.suppress_retry_tasks)
+        await asyncio.gather(*tasks)
+
+        self.assertEqual(sent, [("https://fixupx.com/user/status/123", "none")])
+        self.assertEqual(edits, [{"suppress": True}, {"suppress": True}, {"suppress": True}])
+        self.assertEqual(sleeps, list(embedfix_module.SUPPRESS_RETRY_DELAYS))
+        self.assertEqual(self.cog.suppress_retry_tasks, set())
+        conf = self.cog.config.guild(guild)
+        self.assertEqual(await conf.suppressed_count(), 1)
+        self.assertEqual(await conf.suppress_error_count(), 0)
+
+    async def test_delayed_suppression_retry_failures_do_not_increment_errors(self):
+        guild = types.SimpleNamespace(id=33)
+        calls = 0
+
+        async def edit(**kwargs):
+            nonlocal calls
+            calls += 1
+            raise discord.NotFound()
+
+        message = types.SimpleNamespace(edit=edit)
+
+        await self.cog._suppress_message_embeds(
+            message,
+            guild,
+            warn_on_failure=False,
+            count_success=False,
+            count_error=False,
+        )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(await self.cog.config.guild(guild).suppress_error_count(), 0)
+
     async def test_listener_does_not_suppress_when_send_fails(self):
         edits = []
 
@@ -160,6 +244,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_listener_counts_suppress_failures(self):
         sent = []
+        scheduled = []
 
         async def send(message, allowed_mentions=None):
             sent.append((message, allowed_mentions))
@@ -176,6 +261,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
             channel=types.SimpleNamespace(send=send),
             edit=edit,
         )
+        self.cog._schedule_suppress_retries = lambda message, guild: scheduled.append(message)
 
         await self.cog.on_message_without_command(message)
 
@@ -189,6 +275,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await conf.repost_count(), 1)
         self.assertEqual(await conf.suppressed_count(), 0)
         self.assertEqual(await conf.suppress_error_count(), 1)
+        self.assertEqual(scheduled, [])
 
     async def test_suppress_failure_notice_is_throttled_per_channel(self):
         sent = []
