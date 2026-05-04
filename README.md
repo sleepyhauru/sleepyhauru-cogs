@@ -90,6 +90,17 @@ Replies with `No fuck you` when someone says `fuck you`, with configurable odds,
 
 ![No Fuck You example](docs/screenshots/nofuckyou.png)
 
+### Remoji (`remoji`)
+
+Uploads custom Discord emojis from allowed image URLs and copies custom emojis from other servers. Commands live under `[p]remoji` to avoid generic command-name collisions, and duplicate names are automatically suffixed.
+
+Quick start:
+- Use `[p]remoji upload <url> <name>` to upload an image from Discord CDN or Imgur.
+- Use `[p]remoji copy <emoji> [name]` to copy one custom emoji.
+- Use `[p]remoji copymany <emojis...>` to copy several custom emojis at once.
+- Use `[p]remojiset allowuser <user>` to allow uploads without Manage Emojis.
+- Enable slash/context commands with `[p]slash enablecog remoji` and `[p]slash sync`.
+
 ### SevenTV (`seventv`)
 
 Uploads a Discord emoji from a 7TV link with `[p]7tv <link> [name]`, and inspects emotes with `[p]7tvinfo <link>`. Converts WEBP assets when needed so they can be uploaded to Discord.
