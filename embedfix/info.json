@@ -1,0 +1,12 @@
+{
+    "author": ["sleepyhauru"],
+    "min_bot_version": "3.5.0",
+    "description": "Reposts fixed social-media URLs for better Discord embeds, suppresses embeds on the original message, and provides an embed-backed settings panel with dropdowns.",
+    "hidden": false,
+    "install_msg": "Load it with `[p]load embedfix`. It starts disabled; enable it with `[p]embedfix enable`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Fix broken Discord embeds with an interactive settings panel.",
+    "end_user_data_statement": "This cog stores per-guild configuration settings and aggregate counters. It does not store user data.",
+    "tags": ["utility", "embeds", "listener", "moderation", "social"]
+}

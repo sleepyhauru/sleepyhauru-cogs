@@ -44,6 +44,15 @@ Quick start:
 
 ![EmojiSteal example](docs/screenshots/emojisteal.png)
 
+### EmbedFix (`embedfix`)
+
+Watches for supported social-media URLs, reposts an embed-friendly fixed URL, then suppresses embeds on the original message so the broken preview disappears. `[p]embedfix` opens an embed-backed settings panel with dropdowns for overview, rules, stats, toggles, and rule details. It starts disabled until enabled with `[p]embedfix enable`.
+
+Quick start:
+- Run `[p]embedfix` to open the settings panel, or `[p]embedfix enable` to turn it on directly.
+- Review built-in rules from the dropdown or with `[p]embedfix rules`.
+- Add or replace domains with `[p]embedfix addrule <name> <target_host> <source_hosts...>`.
+
 ### GuildAssets (`guildassets`)
 
 Owner-only backup tools for server emojis and stickers. Export a guild's current assets into the bot's data folder, then import the latest export into another server with the same bot.
