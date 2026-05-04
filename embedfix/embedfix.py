@@ -1,13 +1,10 @@
 import asyncio
-import html
 import inspect
-import io
 import re
 import time
 from typing import Optional
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
-import aiohttp
 import discord
 from discord.ui import Select, View
 from redbot.core import Config, commands
@@ -18,65 +15,63 @@ HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", re.IGNORECASE)
 RULE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.IGNORECASE)
 TRAILING_PUNCTUATION = ".,!?;:"
 MAX_LINKS_LIMIT = 10
-MAX_MEDIA_UPLOAD_BYTES = 25 * 1024 * 1024
-MAX_MEDIA_PAGE_BYTES = 1 * 1024 * 1024
-MEDIA_CHUNK_SIZE = 256 * 1024
 SUPPRESS_NOTICE_COOLDOWN_SECONDS = 600
 SUPPRESS_RETRY_DELAYS = (2.0, 8.0, 20.0)
-INSTAGRAM_TARGET_HOST = "d.ddinstagram.com"
-LEGACY_INSTAGRAM_TARGET_HOSTS = {
-    "ddinstagram.com",
-    "vxinstagram.com",
-    "toinstagram.com",
-    "d.toinstagram.com",
+INSTAGRAM_TARGET_HOST = "fxstagram.com"
+LEGACY_DEFAULT_TARGET_HOSTS = {
+    "x": {"fixupx.com"},
+    "instagram": {
+        "ddinstagram.com",
+        "vxinstagram.com",
+        "toinstagram.com",
+        "d.toinstagram.com",
+        "d.ddinstagram.com",
+    },
+    "tiktok": {"vxtiktok.com"},
+    "reddit": {"rxddit.com"},
 }
 INSTAGRAM_RULE_NAME = "instagram"
-VIDEO_EXTENSIONS = {
-    "video/mp4": ".mp4",
-    "video/quicktime": ".mov",
-    "video/webm": ".webm",
-}
-MEDIA_PAGE_TYPES = {"text/html", "application/xhtml+xml"}
-VIDEO_META_KEYS = {
-    "og:video",
-    "og:video:url",
-    "og:video:secure_url",
-    "twitter:player:stream",
-    "contenturl",
-}
-HTML_TAG_RE = re.compile(r"<(?:meta|source|video)\s+[^>]*>", re.IGNORECASE)
-HTML_ATTR_RE = re.compile(r"([:\w-]+)\s*=\s*(['\"])(.*?)\2", re.IGNORECASE | re.DOTALL)
 
 DEFAULT_RULES = (
     {
         "name": "x",
         "enabled": True,
         "source_hosts": ["x.com", "twitter.com"],
-        "target_host": "fixupx.com",
+        "target_host": "fxtwitter.com",
+        "label": "Tweet",
+        "fixer_name": "FxTwitter",
     },
     {
         "name": "instagram",
         "enabled": True,
         "source_hosts": ["instagram.com"],
         "target_host": INSTAGRAM_TARGET_HOST,
+        "label": "Instagram",
+        "fixer_name": "InstaFix",
     },
     {
         "name": "tiktok",
         "enabled": True,
         "source_hosts": ["tiktok.com"],
-        "target_host": "vxtiktok.com",
+        "target_host": "tnktok.com",
+        "label": "Tiktok",
+        "fixer_name": "fxTikTok",
     },
     {
         "name": "reddit",
         "enabled": True,
         "source_hosts": ["reddit.com", "redd.it"],
-        "target_host": "rxddit.com",
+        "target_host": "vxreddit.com",
+        "label": "Reddit",
+        "fixer_name": "vxreddit",
     },
     {
         "name": "bluesky",
         "enabled": True,
         "source_hosts": ["bsky.app"],
         "target_host": "fxbsky.app",
+        "label": "Bluesky",
+        "fixer_name": "FxBluesky",
     },
 )
 
@@ -89,7 +84,6 @@ class EmbedFixPanelSelect(Select):
             discord.SelectOption(label="Stats", value="stats"),
             discord.SelectOption(label="Toggle enabled", value="toggle_enabled"),
             discord.SelectOption(label="Toggle suppression", value="toggle_suppression"),
-            discord.SelectOption(label="Toggle Instagram upload", value="toggle_instagram_upload"),
             discord.SelectOption(label="Reset rules", value="reset_rules"),
         ]
         super().__init__(
@@ -139,14 +133,6 @@ class EmbedFixPanelSelect(Select):
             conf = view.cog.config.guild(view.guild)
             suppress_original = not await conf.suppress_original()
             await conf.suppress_original.set(suppress_original)
-            embed = await view.cog.build_settings_embed(view.guild, view.prefix)
-            await interaction.response.edit_message(embed=embed, view=view)
-            return
-
-        if action == "toggle_instagram_upload":
-            conf = view.cog.config.guild(view.guild)
-            instagram_media_upload = not await conf.instagram_media_upload()
-            await conf.instagram_media_upload.set(instagram_media_upload)
             embed = await view.cog.build_settings_embed(view.guild, view.prefix)
             await interaction.response.edit_message(embed=embed, view=view)
             return
@@ -240,22 +226,18 @@ class EmbedFix(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.session = None
         self.last_suppress_notice_at = {}
         self.suppress_retry_tasks = set()
         self.config = Config.get_conf(self, identifier=713902406551, force_registration=True)
         self.config.register_guild(
             enabled=False,
             suppress_original=True,
-            instagram_media_upload=True,
             max_links=3,
             rules=self._default_rules(),
             detection_count=0,
             repost_count=0,
-            media_upload_count=0,
             suppressed_count=0,
             send_error_count=0,
-            media_upload_error_count=0,
             suppress_error_count=0,
         )
 
@@ -270,10 +252,6 @@ class EmbedFix(commands.Cog):
         for task in self.suppress_retry_tasks:
             task.cancel()
         self.suppress_retry_tasks.clear()
-        if self.session is not None and not getattr(self.session, "closed", False):
-            loop = getattr(self.bot, "loop", None)
-            if loop is not None:
-                loop.create_task(self.session.close())
 
     @staticmethod
     def _prefix(ctx: commands.Context) -> str:
@@ -289,29 +267,21 @@ class EmbedFix(commands.Cog):
     async def _sleep(self, delay: float):
         await asyncio.sleep(delay)
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self.session is None or getattr(self.session, "closed", False):
-            timeout = aiohttp.ClientTimeout(total=60)
-            self.session = aiohttp.ClientSession(timeout=timeout)
-        return self.session
-
     def _channel_id(self, channel) -> int:
         return getattr(channel, "id", id(channel))
 
     @staticmethod
     def _default_rules() -> list[dict]:
-        return [
-            {
-                "name": rule["name"],
-                "enabled": rule["enabled"],
-                "source_hosts": list(rule["source_hosts"]),
-                "target_host": rule["target_host"],
-            }
-            for rule in DEFAULT_RULES
-        ]
+        rules = []
+        for rule in DEFAULT_RULES:
+            copied_rule = dict(rule)
+            copied_rule["source_hosts"] = list(rule["source_hosts"])
+            rules.append(copied_rule)
+        return rules
 
     @staticmethod
     def _migrate_rules(rules: list[dict]) -> tuple[list[dict], bool]:
+        default_rules = {rule["name"]: rule for rule in DEFAULT_RULES}
         migrated_rules = []
         changed = False
 
@@ -323,13 +293,28 @@ class EmbedFix(commands.Cog):
             migrated_rule = dict(rule)
             source_hosts = migrated_rule.get("source_hosts")
             target_host = migrated_rule.get("target_host")
+            rule_name = migrated_rule.get("name")
+            default_rule = default_rules.get(rule_name)
             if (
-                migrated_rule.get("name") == "instagram"
-                and source_hosts == ["instagram.com"]
-                and target_host in LEGACY_INSTAGRAM_TARGET_HOSTS
+                default_rule is not None
+                and source_hosts == default_rule["source_hosts"]
+                and target_host in LEGACY_DEFAULT_TARGET_HOSTS.get(rule_name, set())
             ):
-                migrated_rule["target_host"] = INSTAGRAM_TARGET_HOST
+                migrated_rule["target_host"] = default_rule["target_host"]
                 changed = True
+
+            if default_rule is not None and source_hosts == default_rule["source_hosts"]:
+                for key in ("label", "fixer_name"):
+                    if migrated_rule.get(key) != default_rule[key]:
+                        migrated_rule[key] = default_rule[key]
+                        changed = True
+            else:
+                if "label" not in migrated_rule:
+                    migrated_rule["label"] = str(rule_name or "Link").title()
+                    changed = True
+                if "fixer_name" not in migrated_rule and isinstance(target_host, str):
+                    migrated_rule["fixer_name"] = target_host
+                    changed = True
             migrated_rules.append(migrated_rule)
 
         return migrated_rules, changed
@@ -361,6 +346,8 @@ class EmbedFix(commands.Cog):
         if not source_hosts:
             raise ValueError("at least one source host is required")
 
+        normalized_name = cls._normalize_rule_name(name)
+        normalized_target = cls._normalize_host(target_host)
         normalized_sources = []
         seen = set()
         for source_host in source_hosts:
@@ -370,10 +357,12 @@ class EmbedFix(commands.Cog):
                 seen.add(source)
 
         return {
-            "name": cls._normalize_rule_name(name),
+            "name": normalized_name,
             "enabled": True,
             "source_hosts": normalized_sources,
-            "target_host": cls._normalize_host(target_host),
+            "target_host": normalized_target,
+            "label": normalized_name.title(),
+            "fixer_name": normalized_target,
         }
 
     @staticmethod
@@ -407,7 +396,7 @@ class EmbedFix(commands.Cog):
         cls,
         url: str,
         rules: list[dict],
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[dict]]:
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -442,13 +431,13 @@ class EmbedFix(commands.Cog):
             fixed_url = urlunsplit(
                 ("https", target_host, parsed.path, parsed.query, parsed.fragment)
             )
-            return fixed_url, rule.get("name")
+            return fixed_url, rule
 
         return None, None
 
     @classmethod
     def _rewrite_url(cls, url: str, rules: list[dict]) -> Optional[str]:
-        fixed_url, _rule_name = cls._rewrite_url_with_rule(url, rules)
+        fixed_url, _rule = cls._rewrite_url_with_rule(url, rules)
         return fixed_url
 
     @classmethod
@@ -464,7 +453,7 @@ class EmbedFix(commands.Cog):
         seen = set()
 
         for url in cls._extract_urls(text):
-            fixed_url, rule_name = cls._rewrite_url_with_rule(url, rules)
+            fixed_url, rule = cls._rewrite_url_with_rule(url, rules)
             if not fixed_url or fixed_url in seen:
                 continue
 
@@ -472,7 +461,9 @@ class EmbedFix(commands.Cog):
                 {
                     "original_url": url,
                     "fixed_url": fixed_url,
-                    "rule_name": rule_name,
+                    "rule_name": rule.get("name") if rule else None,
+                    "label": rule.get("label") if rule else None,
+                    "fixer_name": rule.get("fixer_name") if rule else None,
                 }
             )
             seen.add(fixed_url)
@@ -532,112 +523,107 @@ class EmbedFix(commands.Cog):
         except discord.HTTPException:
             return
 
-    def _media_filename(self, content_type: str, source_url: str) -> str:
-        ext = VIDEO_EXTENSIONS.get(content_type.split(";")[0].strip().lower())
-        if ext is None:
-            path = urlsplit(source_url).path.lower()
-            for candidate in VIDEO_EXTENSIONS.values():
-                if path.endswith(candidate):
-                    ext = candidate
-                    break
-        return f"instagram-media{ext or '.mp4'}"
-
-    def _is_video_response(self, content_type: str, source_url: str) -> bool:
-        content_type = content_type.split(";")[0].strip().lower()
-        if content_type.startswith("video/"):
-            return True
-        path = urlsplit(source_url).path.lower()
-        return any(path.endswith(ext) for ext in VIDEO_EXTENSIONS.values())
-
-    def _is_media_page_response(self, content_type: str) -> bool:
-        return content_type.split(";")[0].strip().lower() in MEDIA_PAGE_TYPES
-
-    def _extract_video_url_from_html(self, page: str, base_url: str) -> Optional[str]:
-        for match in HTML_TAG_RE.finditer(page):
-            attrs = {
-                key.lower(): html.unescape(value)
-                for key, _quote, value in HTML_ATTR_RE.findall(match.group(0))
-            }
-            stream_url = attrs.get("content")
-            key = attrs.get("property") or attrs.get("name") or attrs.get("itemprop")
-            if key and key.lower() in VIDEO_META_KEYS and stream_url:
-                return urljoin(base_url, stream_url)
-
-            stream_url = attrs.get("src")
-            if stream_url:
-                return urljoin(base_url, stream_url)
-
-        return None
-
-    async def _read_response_bytes(self, response, max_bytes: int) -> Optional[bytes]:
-        data = bytearray()
-        async for chunk in response.content.iter_chunked(MEDIA_CHUNK_SIZE):
-            data.extend(chunk)
-            if len(data) > max_bytes:
-                return None
-        return bytes(data) if data else None
-
-    async def _download_instagram_media(self, url: str) -> Optional[tuple[bytes, str]]:
-        try:
-            return await self._download_instagram_media_url(url, allow_html=True)
-        except (aiohttp.ClientError, AttributeError, ValueError, TypeError, UnicodeDecodeError):
-            return None
-
-    async def _download_instagram_media_url(
+    def _author_link_for_url(
         self,
         url: str,
-        *,
-        allow_html: bool,
-    ) -> Optional[tuple[bytes, str]]:
-        session = await self._get_session()
-        async with session.get(url, allow_redirects=True) as response:
-            status = getattr(response, "status", 200)
-            if status >= 400:
-                return None
-
-            content_type = response.headers.get("Content-Type", "")
-            response_url = str(getattr(response, "url", url))
-            if self._is_video_response(content_type, response_url):
-                content_length = response.headers.get("Content-Length")
-                if content_length is not None and int(content_length) > MAX_MEDIA_UPLOAD_BYTES:
-                    return None
-
-                data = await self._read_response_bytes(response, MAX_MEDIA_UPLOAD_BYTES)
-                if not data:
-                    return None
-                return data, self._media_filename(content_type, response_url)
-
-            if allow_html and self._is_media_page_response(content_type):
-                data = await self._read_response_bytes(response, MAX_MEDIA_PAGE_BYTES)
-                if not data:
-                    return None
-
-                page = data.decode("utf-8", errors="replace")
-                video_url = self._extract_video_url_from_html(page, response_url)
-                if video_url and video_url != response_url:
-                    return await self._download_instagram_media_url(video_url, allow_html=False)
-
-        return None
-
-    async def _send_instagram_media_upload(self, channel, guild, url: str) -> bool:
-        media = await self._download_instagram_media(url)
-        if media is None:
-            await self._increment_guild_counter(guild, "media_upload_error_count")
-            return False
-
-        data, filename = media
+        rule_name: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
         try:
-            await channel.send(
-                "Instagram media",
-                file=discord.File(io.BytesIO(data), filename=filename),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            await self._increment_guild_counter(guild, "media_upload_error_count")
-            return False
+            parsed = urlsplit(url)
+        except ValueError:
+            return None, None
 
-        await self._increment_guild_counter(guild, "media_upload_count")
-        return True
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        username = None
+        author_path = None
+
+        if rule_name == "x" and len(segments) >= 3 and segments[1] == "status":
+            username = segments[0]
+            author_path = f"/{username}"
+        elif (
+            rule_name == INSTAGRAM_RULE_NAME
+            and len(segments) >= 3
+            and segments[1] in {"p", "reel", "reels"}
+        ):
+            username = segments[0]
+            author_path = f"/{username}"
+        elif rule_name == "tiktok" and segments and segments[0].startswith("@"):
+            username = segments[0].lstrip("@")
+            author_path = f"/@{username}"
+        elif (
+            rule_name == "reddit"
+            and len(segments) >= 2
+            and segments[0] in {"r", "u", "user"}
+        ):
+            username = segments[1]
+            author_path = f"/{segments[0]}/{username}"
+        elif (
+            rule_name == "bluesky"
+            and len(segments) >= 4
+            and segments[0] == "profile"
+            and segments[2] == "post"
+        ):
+            username = segments[1]
+            author_path = f"/profile/{username}"
+
+        if not username or not author_path:
+            return None, None
+        return f"{origin}{author_path}", username
+
+    def _render_fixed_link(self, fixed_link: dict) -> str:
+        original_url = fixed_link["original_url"]
+        fixed_url = fixed_link["fixed_url"]
+        rule_name = fixed_link.get("rule_name")
+        original_label = fixed_link.get("label") or str(rule_name or "Link").title()
+        fixer_name = fixed_link.get("fixer_name") or urlsplit(fixed_url).hostname or "Fixed"
+        rendered = f"[{original_label}](<{original_url}>)"
+
+        author_url, author_label = self._author_link_for_url(original_url, rule_name)
+        if author_url and author_label:
+            mention_space = " " if author_label.startswith(("everyone", "here")) else ""
+            rendered += f" • [@{mention_space}{author_label}](<{author_url}>)"
+
+        return f"{rendered} • [{fixer_name}]({fixed_url})"
+
+    def _group_rendered_links(self, rendered_links: list[str]) -> list[str]:
+        groups = []
+        current = ""
+        for rendered_link in rendered_links:
+            if not current:
+                current = rendered_link
+                continue
+
+            candidate = f"{current}\n{rendered_link}"
+            if len(candidate) > 2000:
+                groups.append(current)
+                current = rendered_link
+            else:
+                current = candidate
+
+        if current:
+            groups.append(current)
+        return groups
+
+    async def _send_link_message(self, original_message, channel, content: str, *, reply: bool):
+        allowed_mentions = discord.AllowedMentions.none()
+        if reply and original_message is not None:
+            reply_method = getattr(original_message, "reply", None)
+            if reply_method is not None:
+                try:
+                    await reply_method(
+                        content,
+                        mention_author=False,
+                        allowed_mentions=allowed_mentions,
+                    )
+                    return
+                except TypeError:
+                    await reply_method(content, allowed_mentions=allowed_mentions)
+                    return
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    pass
+
+        await channel.send(content, allowed_mentions=allowed_mentions)
 
     async def _send_fixed_links(
         self,
@@ -645,30 +631,22 @@ class EmbedFix(commands.Cog):
         guild,
         fixed_links: list[dict],
         *,
-        instagram_media_upload: bool,
+        original_message=None,
     ) -> bool:
-        fallback_urls = []
-        sent_any = False
+        rendered_links = [self._render_fixed_link(fixed_link) for fixed_link in fixed_links]
+        groups = self._group_rendered_links(rendered_links)
+        if not groups:
+            return False
 
-        for fixed_link in fixed_links:
-            fixed_url = fixed_link["fixed_url"]
-            if (
-                instagram_media_upload
-                and fixed_link.get("rule_name") == INSTAGRAM_RULE_NAME
-                and await self._send_instagram_media_upload(channel, guild, fixed_url)
-            ):
-                sent_any = True
-                continue
-            fallback_urls.append(fixed_url)
-
-        if fallback_urls:
-            await channel.send(
-                "\n".join(fallback_urls),
-                allowed_mentions=discord.AllowedMentions.none(),
+        for index, content in enumerate(groups):
+            await self._send_link_message(
+                original_message,
+                channel,
+                content,
+                reply=index == 0,
             )
-            sent_any = True
 
-        return sent_any
+        return True
 
     async def _fresh_message(self, message: discord.Message) -> discord.Message:
         channel = getattr(message, "channel", None)
@@ -803,7 +781,6 @@ class EmbedFix(commands.Cog):
         conf = self.config.guild(guild)
         enabled = await conf.enabled()
         suppress_original = await conf.suppress_original()
-        instagram_media_upload = await conf.instagram_media_upload()
         max_links = await conf.max_links()
         rules = await self._get_rules(guild)
         enabled_rules = sum(1 for rule in rules if rule.get("enabled", True))
@@ -825,7 +802,6 @@ class EmbedFix(commands.Cog):
         )
         embed.add_field(name="Enabled", value=f"`{enabled}`")
         embed.add_field(name="Original embed suppression", value=f"`{suppress_original}`")
-        embed.add_field(name="Instagram media upload", value=f"`{instagram_media_upload}`")
         embed.add_field(name="Max fixed links per message", value=f"`{max_links}`")
         embed.add_field(name="Rules", value=f"`{enabled_rules}/{len(rules)}` enabled")
         embed.add_field(name="Next step", value=next_step)
@@ -898,16 +874,11 @@ class EmbedFix(commands.Cog):
         )
         embed.add_field(name="Messages detected", value=f"`{await conf.detection_count()}`")
         embed.add_field(name="Reposts sent", value=f"`{await conf.repost_count()}`")
-        embed.add_field(name="Media uploads sent", value=f"`{await conf.media_upload_count()}`")
         embed.add_field(
             name="Original embeds suppressed",
             value=f"`{await conf.suppressed_count()}`",
         )
         embed.add_field(name="Send errors", value=f"`{await conf.send_error_count()}`")
-        embed.add_field(
-            name="Media upload errors",
-            value=f"`{await conf.media_upload_error_count()}`",
-        )
         embed.add_field(name="Suppress errors", value=f"`{await conf.suppress_error_count()}`")
         embed.set_footer(text="Suppress errors usually mean the bot lacks Manage Messages.")
         return embed
@@ -916,7 +887,6 @@ class EmbedFix(commands.Cog):
         conf = self.config.guild(guild)
         enabled = await conf.enabled()
         suppress_original = await conf.suppress_original()
-        instagram_media_upload = await conf.instagram_media_upload()
         max_links = await conf.max_links()
         rules = await self._get_rules(guild)
         next_step = (
@@ -931,7 +901,6 @@ class EmbedFix(commands.Cog):
             "EmbedFix settings\n"
             f"Enabled: `{enabled}`\n"
             f"Suppress original embeds: `{suppress_original}`\n"
-            f"Instagram media upload: `{instagram_media_upload}`\n"
             f"Max fixed links per message: `{max_links}`\n"
             f"Rules configured: `{len(rules)}`\n"
             f"{next_step}"
@@ -970,7 +939,7 @@ class EmbedFix(commands.Cog):
                 message.channel,
                 guild,
                 fixed_links,
-                instagram_media_upload=await conf.instagram_media_upload(),
+                original_message=message,
             )
         except discord.HTTPException:
             sent_fixed = False
@@ -1040,13 +1009,6 @@ class EmbedFix(commands.Cog):
         assert ctx.guild
         await self.config.guild(ctx.guild).suppress_original.set(enabled)
         await ctx.send(f"Original embed suppression set to `{enabled}`.")
-
-    @embedfixset.command(name="instagramupload")
-    async def embedfixset_instagramupload(self, ctx: commands.Context, enabled: bool):
-        """Set whether Instagram media should be uploaded instead of URL-only reposted."""
-        assert ctx.guild
-        await self.config.guild(ctx.guild).instagram_media_upload.set(enabled)
-        await ctx.send(f"Instagram media upload set to `{enabled}`.")
 
     @embedfixset.command(name="maxlinks")
     async def embedfixset_maxlinks(self, ctx: commands.Context, amount: int):
@@ -1146,10 +1108,8 @@ class EmbedFix(commands.Cog):
             "EmbedFix stats\n"
             f"Messages detected: `{await conf.detection_count()}`\n"
             f"Reposts sent: `{await conf.repost_count()}`\n"
-            f"Media uploads sent: `{await conf.media_upload_count()}`\n"
             f"Original embeds suppressed: `{await conf.suppressed_count()}`\n"
             f"Send errors: `{await conf.send_error_count()}`\n"
-            f"Media upload errors: `{await conf.media_upload_error_count()}`\n"
             f"Suppress errors: `{await conf.suppress_error_count()}`"
         )
         await ctx.send(message)
