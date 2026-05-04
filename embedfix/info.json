@@ -3,7 +3,7 @@
     "min_bot_version": "3.5.0",
     "description": "Reposts fixed social-media URLs for better Discord embeds, suppresses embeds on the original message, and provides an embed-backed settings panel with dropdowns.",
     "hidden": false,
-    "install_msg": "Load it with `[p]load embedfix`. It starts disabled; enable it with `[p]embedfix enable`.",
+    "install_msg": "Load it with `[p]load embedfix`. It starts disabled; enable it with `[p]embedfix enable`. Give the bot Manage Messages in watched channels so it can suppress original embeds.",
     "required_cogs": {},
     "requirements": [],
     "short": "Fix broken Discord embeds with an interactive settings panel.",

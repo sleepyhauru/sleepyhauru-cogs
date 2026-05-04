@@ -50,7 +50,8 @@ Watches for supported social-media URLs, reposts an embed-friendly fixed URL, th
 
 Quick start:
 - Run `[p]embedfix` to open the settings panel, or `[p]embedfix enable` to turn it on directly.
-- Review built-in rules from the dropdown or with `[p]embedfix rules`.
+- Give the bot `Manage Messages` in watched channels so it can suppress the original broken embed.
+- Review built-in rules from the dropdown or with `[p]embedfix rules`; Instagram uses `vxinstagram.com` by default.
 - Add or replace domains with `[p]embedfix addrule <name> <target_host> <source_hosts...>`.
 
 ### GuildAssets (`guildassets`)

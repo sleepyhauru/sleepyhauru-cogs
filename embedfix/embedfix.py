@@ -1,5 +1,6 @@
 import inspect
 import re
+import time
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -13,6 +14,8 @@ HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", re.IGNORECASE)
 RULE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.IGNORECASE)
 TRAILING_PUNCTUATION = ".,!?;:"
 MAX_LINKS_LIMIT = 10
+SUPPRESS_NOTICE_COOLDOWN_SECONDS = 600
+LEGACY_INSTAGRAM_TARGET_HOSTS = {"ddinstagram.com"}
 
 DEFAULT_RULES = (
     {
@@ -25,7 +28,7 @@ DEFAULT_RULES = (
         "name": "instagram",
         "enabled": True,
         "source_hosts": ["instagram.com"],
-        "target_host": "ddinstagram.com",
+        "target_host": "vxinstagram.com",
     },
     {
         "name": "tiktok",
@@ -198,6 +201,7 @@ class EmbedFix(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.last_suppress_notice_at = {}
         self.config = Config.get_conf(self, identifier=713902406551, force_registration=True)
         self.config.register_guild(
             enabled=False,
@@ -226,6 +230,12 @@ class EmbedFix(commands.Cog):
     def _message_text(message: discord.Message) -> str:
         return getattr(message, "content", "") or ""
 
+    def _now(self) -> float:
+        return time.monotonic()
+
+    def _channel_id(self, channel) -> int:
+        return getattr(channel, "id", id(channel))
+
     @staticmethod
     def _default_rules() -> list[dict]:
         return [
@@ -237,6 +247,30 @@ class EmbedFix(commands.Cog):
             }
             for rule in DEFAULT_RULES
         ]
+
+    @staticmethod
+    def _migrate_rules(rules: list[dict]) -> tuple[list[dict], bool]:
+        migrated_rules = []
+        changed = False
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                migrated_rules.append(rule)
+                continue
+
+            migrated_rule = dict(rule)
+            source_hosts = migrated_rule.get("source_hosts")
+            target_host = migrated_rule.get("target_host")
+            if (
+                migrated_rule.get("name") == "instagram"
+                and source_hosts == ["instagram.com"]
+                and target_host in LEGACY_INSTAGRAM_TARGET_HOSTS
+            ):
+                migrated_rule["target_host"] = "vxinstagram.com"
+                changed = True
+            migrated_rules.append(migrated_rule)
+
+        return migrated_rules, changed
 
     @staticmethod
     def _normalize_rule_name(name: str) -> str:
@@ -376,7 +410,40 @@ class EmbedFix(commands.Cog):
         if not isinstance(rules, list):
             rules = self._default_rules()
             await self.config.guild(guild).rules.set(rules)
+            return rules
+
+        rules, changed = self._migrate_rules(rules)
+        if changed:
+            await self.config.guild(guild).rules.set(rules)
         return rules
+
+    def _should_send_suppress_notice(self, channel) -> bool:
+        channel_id = self._channel_id(channel)
+        last_notice_at = self.last_suppress_notice_at.get(channel_id)
+        now = self._now()
+        if (
+            last_notice_at is not None
+            and now - last_notice_at < SUPPRESS_NOTICE_COOLDOWN_SECONDS
+        ):
+            return False
+
+        self.last_suppress_notice_at[channel_id] = now
+        return True
+
+    async def _send_suppress_failure_notice(self, message: discord.Message):
+        channel = getattr(message, "channel", None)
+        if channel is None or not self._should_send_suppress_notice(channel):
+            return
+
+        try:
+            await channel.send(
+                "EmbedFix reposted the fixed link, but Discord would not let me "
+                "suppress the original embed. Give the bot `Manage Messages` in "
+                "this channel, then try again.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            return
 
     def _rules_message(self, rules: list[dict]) -> str:
         lines = ["EmbedFix rules"]
@@ -567,8 +634,12 @@ class EmbedFix(commands.Cog):
 
         try:
             await message.edit(suppress=True)
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        except discord.NotFound:
             await self._increment_guild_counter(guild, "suppress_error_count")
+            return
+        except (discord.Forbidden, discord.HTTPException):
+            await self._increment_guild_counter(guild, "suppress_error_count")
+            await self._send_suppress_failure_notice(message)
             return
 
         await self._increment_guild_counter(guild, "suppressed_count")

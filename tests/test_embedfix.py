@@ -46,9 +46,21 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.cog._rewrite_url("https://www.instagram.com/reel/abc/", rules),
-            "https://ddinstagram.com/reel/abc/",
+            "https://vxinstagram.com/reel/abc/",
         )
         self.assertIsNone(self.cog._rewrite_url("https://example.com/path", rules))
+
+    async def test_get_rules_migrates_legacy_instagram_default_target(self):
+        guild = types.SimpleNamespace(id=30)
+        rules = self.cog._default_rules()
+        instagram_rule = next(rule for rule in rules if rule["name"] == "instagram")
+        instagram_rule["target_host"] = "ddinstagram.com"
+        await self.cog.config.guild(guild).rules.set(rules)
+
+        migrated = await self.cog._get_rules(guild)
+
+        instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
+        self.assertEqual(instagram_rule["target_host"], "vxinstagram.com")
 
     def test_extract_urls_trims_punctuation_and_skips_suppressed_links(self):
         urls = self.cog._extract_urls(
@@ -150,7 +162,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         sent = []
 
         async def send(message, allowed_mentions=None):
-            sent.append(message)
+            sent.append((message, allowed_mentions))
 
         async def edit(**kwargs):
             raise discord.Forbidden()
@@ -167,11 +179,49 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
 
         await self.cog.on_message_without_command(message)
 
-        self.assertEqual(sent, ["https://rxddit.com/r/test/comments/123/title/"])
+        self.assertEqual(
+            sent[0],
+            ("https://rxddit.com/r/test/comments/123/title/", "none"),
+        )
+        self.assertIn("Manage Messages", sent[1][0])
+        self.assertEqual(sent[1][1], "none")
         conf = self.cog.config.guild(guild)
         self.assertEqual(await conf.repost_count(), 1)
         self.assertEqual(await conf.suppressed_count(), 0)
         self.assertEqual(await conf.suppress_error_count(), 1)
+
+    async def test_suppress_failure_notice_is_throttled_per_channel(self):
+        sent = []
+
+        async def send(message, allowed_mentions=None):
+            sent.append(message)
+
+        async def edit(**kwargs):
+            raise discord.Forbidden()
+
+        guild = types.SimpleNamespace(id=31)
+        await self._enable(guild.id)
+        channel = types.SimpleNamespace(id=3100, send=send)
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False),
+            guild=guild,
+            content="https://x.com/user/status/123",
+            channel=channel,
+            edit=edit,
+        )
+        original_now = self.cog._now
+        values = iter([100.0, 101.0])
+        self.cog._now = lambda: next(values)
+        try:
+            await self.cog.on_message_without_command(message)
+            await self.cog.on_message_without_command(message)
+        finally:
+            self.cog._now = original_now
+
+        self.assertEqual(sent[0], "https://fixupx.com/user/status/123")
+        self.assertIn("Manage Messages", sent[1])
+        self.assertEqual(sent[2], "https://fixupx.com/user/status/123")
+        self.assertEqual(len(sent), 3)
 
     async def test_embedfix_group_sends_embed_panel_with_dropdowns(self):
         sent = []
