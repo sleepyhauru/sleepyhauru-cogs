@@ -47,7 +47,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.cog._rewrite_url("https://www.instagram.com/reel/abc/", rules),
-            "https://d.toinstagram.com/reel/abc/",
+            "https://d.ddinstagram.com/reel/abc/",
         )
         self.assertIsNone(self.cog._rewrite_url("https://example.com/path", rules))
 
@@ -61,7 +61,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         migrated = await self.cog._get_rules(guild)
 
         instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
-        self.assertEqual(instagram_rule["target_host"], "d.toinstagram.com")
+        self.assertEqual(instagram_rule["target_host"], "d.ddinstagram.com")
 
     async def test_get_rules_migrates_vxinstagram_default_target(self):
         guild = types.SimpleNamespace(id=34)
@@ -73,7 +73,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         migrated = await self.cog._get_rules(guild)
 
         instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
-        self.assertEqual(instagram_rule["target_host"], "d.toinstagram.com")
+        self.assertEqual(instagram_rule["target_host"], "d.ddinstagram.com")
 
     async def test_get_rules_migrates_toinstagram_default_target(self):
         guild = types.SimpleNamespace(id=37)
@@ -85,7 +85,19 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         migrated = await self.cog._get_rules(guild)
 
         instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
-        self.assertEqual(instagram_rule["target_host"], "d.toinstagram.com")
+        self.assertEqual(instagram_rule["target_host"], "d.ddinstagram.com")
+
+    async def test_get_rules_migrates_d_toinstagram_default_target(self):
+        guild = types.SimpleNamespace(id=41)
+        rules = self.cog._default_rules()
+        instagram_rule = next(rule for rule in rules if rule["name"] == "instagram")
+        instagram_rule["target_host"] = "d.toinstagram.com"
+        await self.cog.config.guild(guild).rules.set(rules)
+
+        migrated = await self.cog._get_rules(guild)
+
+        instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
+        self.assertEqual(instagram_rule["target_host"], "d.ddinstagram.com")
 
     async def test_get_rules_preserves_custom_instagram_target(self):
         guild = types.SimpleNamespace(id=35)
@@ -211,18 +223,215 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             edits,
             [
-                ("original", {"suppress": True}),
+                ("fetched", {"suppress": True}),
                 ("fetched", {"suppress": True}),
                 ("fetched", {"suppress": True}),
                 ("fetched", {"suppress": True}),
             ],
         )
-        self.assertEqual(fetched, [3200, 3200, 3200])
+        self.assertEqual(fetched, [3200, 3200, 3200, 3200])
         self.assertEqual(sleeps, list(embedfix_module.SUPPRESS_RETRY_DELAYS))
         self.assertEqual(self.cog.suppress_retry_tasks, set())
         conf = self.cog.config.guild(guild)
         self.assertEqual(await conf.suppressed_count(), 1)
         self.assertEqual(await conf.suppress_error_count(), 0)
+
+    async def test_listener_retries_when_initial_fresh_suppression_fails(self):
+        sent = []
+        edits = []
+        sleeps = []
+        fetched = []
+
+        async def send(message, allowed_mentions=None):
+            sent.append((message, allowed_mentions))
+
+        async def sleep(delay):
+            sleeps.append(delay)
+
+        async def fetched_edit(**kwargs):
+            edits.append(kwargs)
+            if len(edits) == 1:
+                raise discord.HTTPException()
+
+        async def fetch_message(message_id):
+            fetched.append(message_id)
+            return types.SimpleNamespace(edit=fetched_edit)
+
+        guild = types.SimpleNamespace(id=43)
+        await self._enable(guild.id)
+        self.cog._sleep = sleep
+        message = types.SimpleNamespace(
+            id=4300,
+            author=types.SimpleNamespace(bot=False),
+            guild=guild,
+            content="https://twitter.com/user/status/123",
+            channel=types.SimpleNamespace(send=send, fetch_message=fetch_message),
+        )
+
+        await self.cog.on_message_without_command(message)
+        tasks = list(self.cog.suppress_retry_tasks)
+        await asyncio.gather(*tasks)
+
+        self.assertEqual(sent, [("https://fixupx.com/user/status/123", "none")])
+        self.assertEqual(edits, [{"suppress": True}] * 4)
+        self.assertEqual(fetched, [4300, 4300, 4300, 4300])
+        self.assertEqual(sleeps, list(embedfix_module.SUPPRESS_RETRY_DELAYS))
+        conf = self.cog.config.guild(guild)
+        self.assertEqual(await conf.suppressed_count(), 1)
+        self.assertEqual(await conf.suppress_error_count(), 1)
+
+    async def test_listener_uploads_instagram_media_when_download_succeeds(self):
+        sent = []
+        edits = []
+        downloads = []
+
+        async def send(message=None, file=None, allowed_mentions=None):
+            sent.append((message, file, allowed_mentions))
+
+        async def edit(**kwargs):
+            edits.append(kwargs)
+
+        async def download(url):
+            downloads.append(url)
+            return b"video-bytes", "reel.mp4"
+
+        guild = types.SimpleNamespace(id=38)
+        await self._enable(guild.id)
+        self.cog._download_instagram_media = download
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False),
+            guild=guild,
+            content="https://instagram.com/reel/abc/",
+            channel=types.SimpleNamespace(send=send),
+            edit=edit,
+        )
+
+        await self.cog.on_message_without_command(message)
+
+        self.assertEqual(downloads, ["https://d.ddinstagram.com/reel/abc/"])
+        self.assertEqual(sent[0][0], "Instagram media")
+        self.assertEqual(sent[0][1].filename, "reel.mp4")
+        self.assertEqual(sent[0][2], "none")
+        self.assertEqual(edits, [{"suppress": True}])
+        conf = self.cog.config.guild(guild)
+        self.assertEqual(await conf.repost_count(), 1)
+        self.assertEqual(await conf.media_upload_count(), 1)
+        self.assertEqual(await conf.media_upload_error_count(), 0)
+
+    async def test_listener_falls_back_to_instagram_url_when_media_download_fails(self):
+        sent = []
+
+        async def send(message=None, file=None, allowed_mentions=None):
+            sent.append((message, file, allowed_mentions))
+
+        async def download(url):
+            return None
+
+        guild = types.SimpleNamespace(id=39)
+        await self._enable(guild.id)
+        await self.cog.config.guild(guild).suppress_original.set(False)
+        self.cog._download_instagram_media = download
+        message = types.SimpleNamespace(
+            author=types.SimpleNamespace(bot=False),
+            guild=guild,
+            content="https://instagram.com/reel/abc/",
+            channel=types.SimpleNamespace(send=send),
+        )
+
+        await self.cog.on_message_without_command(message)
+
+        self.assertEqual(sent, [("https://d.ddinstagram.com/reel/abc/", None, "none")])
+        conf = self.cog.config.guild(guild)
+        self.assertEqual(await conf.repost_count(), 1)
+        self.assertEqual(await conf.media_upload_count(), 0)
+        self.assertEqual(await conf.media_upload_error_count(), 1)
+
+    async def test_download_instagram_media_follows_html_video_meta(self):
+        class FakeContent:
+            def __init__(self, chunks):
+                self.chunks = chunks
+
+            def iter_chunked(self, _size):
+                async def iterator():
+                    for chunk in self.chunks:
+                        yield chunk
+
+                return iterator()
+
+        class FakeResponse:
+            def __init__(self, url, content_type, chunks):
+                self.status = 200
+                self.url = url
+                self.headers = {"Content-Type": content_type}
+                self.content = FakeContent(chunks)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class FakeSession:
+            closed = False
+
+            def __init__(self):
+                self.urls = []
+
+            def get(self, url, allow_redirects=True):
+                self.urls.append(url)
+                if url.endswith("/reel/abc/"):
+                    return FakeResponse(
+                        url,
+                        "text/html",
+                        [
+                            b'<meta property="twitter:player:stream" '
+                            b'content="/videos/abc/1">',
+                        ],
+                    )
+                return FakeResponse(url, "video/mp4", [b"video-bytes"])
+
+        self.cog.session = FakeSession()
+
+        media = await self.cog._download_instagram_media("https://d.ddinstagram.com/reel/abc/")
+
+        self.assertEqual(media, (b"video-bytes", "instagram-media.mp4"))
+        self.assertEqual(
+            self.cog.session.urls,
+            [
+                "https://d.ddinstagram.com/reel/abc/",
+                "https://d.ddinstagram.com/videos/abc/1",
+            ],
+        )
+
+    async def test_send_fixed_links_respects_instagram_upload_toggle(self):
+        sent = []
+        downloads = []
+
+        async def send(message=None, file=None, allowed_mentions=None):
+            sent.append((message, file, allowed_mentions))
+
+        async def download(url):
+            downloads.append(url)
+            return b"video-bytes", "reel.mp4"
+
+        guild = types.SimpleNamespace(id=40)
+        self.cog._download_instagram_media = download
+        fixed_links = [
+            {
+                "fixed_url": "https://d.ddinstagram.com/reel/abc/",
+                "rule_name": embedfix_module.INSTAGRAM_RULE_NAME,
+            }
+        ]
+
+        await self.cog._send_fixed_links(
+            types.SimpleNamespace(send=send),
+            guild,
+            fixed_links,
+            instagram_media_upload=False,
+        )
+
+        self.assertEqual(downloads, [])
+        self.assertEqual(sent, [("https://d.ddinstagram.com/reel/abc/", None, "none")])
 
     async def test_delayed_suppression_retry_failures_do_not_increment_errors(self):
         guild = types.SimpleNamespace(id=33)
@@ -246,17 +455,40 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 1)
         self.assertEqual(await self.cog.config.guild(guild).suppress_error_count(), 0)
 
-    async def test_suppress_message_uses_suppress_embeds_method_when_available(self):
+    async def test_suppress_message_uses_edit_suppress_keyword(self):
         guild = types.SimpleNamespace(id=36)
+        edit_calls = []
+        suppress_calls = []
+
+        async def suppress_embeds(value):
+            suppress_calls.append(value)
+
+        async def edit(**kwargs):
+            edit_calls.append(kwargs)
+
+        message = types.SimpleNamespace(suppress_embeds=suppress_embeds, edit=edit)
+
+        result = await self.cog._suppress_message_embeds(
+            message,
+            guild,
+            warn_on_failure=False,
+            count_success=True,
+            count_error=True,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(edit_calls, [{"suppress": True}])
+        self.assertEqual(suppress_calls, [])
+        self.assertEqual(await self.cog.config.guild(guild).suppressed_count(), 1)
+
+    async def test_suppress_message_falls_back_to_suppress_embeds_method(self):
+        guild = types.SimpleNamespace(id=42)
         calls = []
 
         async def suppress_embeds(value):
             calls.append(value)
 
-        async def edit(**kwargs):
-            raise AssertionError("edit should not be used when suppress_embeds exists")
-
-        message = types.SimpleNamespace(suppress_embeds=suppress_embeds, edit=edit)
+        message = types.SimpleNamespace(suppress_embeds=suppress_embeds)
 
         result = await self.cog._suppress_message_embeds(
             message,
@@ -270,7 +502,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [True])
         self.assertEqual(await self.cog.config.guild(guild).suppressed_count(), 1)
 
-    async def test_listener_does_not_suppress_when_send_fails(self):
+    async def test_listener_still_suppresses_when_send_fails(self):
         edits = []
 
         async def send(message, allowed_mentions=None):
@@ -291,10 +523,11 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
 
         await self.cog.on_message_without_command(message)
 
-        self.assertEqual(edits, [])
+        self.assertEqual(edits, [{"suppress": True}])
         conf = self.cog.config.guild(guild)
         self.assertEqual(await conf.repost_count(), 0)
         self.assertEqual(await conf.send_error_count(), 1)
+        self.assertEqual(await conf.suppressed_count(), 1)
 
     async def test_listener_counts_suppress_failures(self):
         sent = []
@@ -491,6 +724,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
 
         await self.cog.embedfixset_enable(ctx)
         await self.cog.embedfixset_suppress(ctx, False)
+        await self.cog.embedfixset_instagramupload(ctx, False)
         await self.cog.embedfixset_maxlinks(ctx, 99)
         await self.cog.embedfixset_addrule(ctx, "threads", "fixthreads.net", "threads.net")
         await self.cog.embedfixset_disablerule(ctx, "threads")
@@ -503,10 +737,12 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         threads_rule = next(rule for rule in rules if rule["name"] == "threads")
         self.assertTrue(await conf.enabled())
         self.assertFalse(await conf.suppress_original())
+        self.assertFalse(await conf.instagram_media_upload())
         self.assertEqual(await conf.max_links(), embedfix_module.MAX_LINKS_LIMIT)
         self.assertFalse(threads_rule["enabled"])
         self.assertIn("EmbedFix enabled.", sent)
         self.assertIn("Original embed suppression set to `False`.", sent)
+        self.assertIn("Instagram media upload set to `False`.", sent)
         self.assertIn("Max fixed links per message set to `10`.", sent)
         self.assertIn("Rule `threads` saved: `threads.net` -> `fixthreads.net`.", sent)
         self.assertIn("Rule `threads` disabled.", sent)

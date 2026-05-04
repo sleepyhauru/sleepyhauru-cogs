@@ -46,12 +46,13 @@ Quick start:
 
 ### EmbedFix (`embedfix`)
 
-Watches for supported social-media URLs, reposts an embed-friendly fixed URL, then suppresses embeds on the original message so the broken preview disappears. `[p]embedfix` opens an embed-backed settings panel with dropdowns for overview, rules, stats, toggles, and rule details. It starts disabled until enabled with `[p]embedfix enable`.
+Watches for supported social-media URLs, reposts an embed-friendly fixed URL, then suppresses embeds on the original message so the broken preview disappears. Instagram reels can be uploaded as playable media instead of relying on URL previews. `[p]embedfix` opens an embed-backed settings panel with dropdowns for overview, rules, stats, toggles, and rule details. It starts disabled until enabled with `[p]embedfix enable`.
 
 Quick start:
 - Run `[p]embedfix` to open the settings panel, or `[p]embedfix enable` to turn it on directly.
 - Give the bot `Manage Messages` in watched channels so it can suppress the original broken embed.
-- Review built-in rules from the dropdown or with `[p]embedfix rules`; Instagram uses `d.toinstagram.com` by default for direct reel media.
+- Keep `[p]embedfix instagramupload true` enabled if you want Instagram reels uploaded as playable files.
+- Review built-in rules from the dropdown or with `[p]embedfix rules`; Instagram falls back to `d.ddinstagram.com` if media upload fails.
 - Add or replace domains with `[p]embedfix addrule <name> <target_host> <source_hosts...>`.
 
 ### GuildAssets (`guildassets`)

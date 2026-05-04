@@ -1,10 +1,13 @@
 import asyncio
+import html
 import inspect
+import io
 import re
 import time
 from typing import Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
+import aiohttp
 import discord
 from discord.ui import Select, View
 from redbot.core import Config, commands
@@ -15,10 +18,34 @@ HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", re.IGNORECASE)
 RULE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.IGNORECASE)
 TRAILING_PUNCTUATION = ".,!?;:"
 MAX_LINKS_LIMIT = 10
+MAX_MEDIA_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_MEDIA_PAGE_BYTES = 1 * 1024 * 1024
+MEDIA_CHUNK_SIZE = 256 * 1024
 SUPPRESS_NOTICE_COOLDOWN_SECONDS = 600
 SUPPRESS_RETRY_DELAYS = (2.0, 8.0, 20.0)
-INSTAGRAM_TARGET_HOST = "d.toinstagram.com"
-LEGACY_INSTAGRAM_TARGET_HOSTS = {"ddinstagram.com", "vxinstagram.com", "toinstagram.com"}
+INSTAGRAM_TARGET_HOST = "d.ddinstagram.com"
+LEGACY_INSTAGRAM_TARGET_HOSTS = {
+    "ddinstagram.com",
+    "vxinstagram.com",
+    "toinstagram.com",
+    "d.toinstagram.com",
+}
+INSTAGRAM_RULE_NAME = "instagram"
+VIDEO_EXTENSIONS = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+}
+MEDIA_PAGE_TYPES = {"text/html", "application/xhtml+xml"}
+VIDEO_META_KEYS = {
+    "og:video",
+    "og:video:url",
+    "og:video:secure_url",
+    "twitter:player:stream",
+    "contenturl",
+}
+HTML_TAG_RE = re.compile(r"<(?:meta|source|video)\s+[^>]*>", re.IGNORECASE)
+HTML_ATTR_RE = re.compile(r"([:\w-]+)\s*=\s*(['\"])(.*?)\2", re.IGNORECASE | re.DOTALL)
 
 DEFAULT_RULES = (
     {
@@ -62,6 +89,7 @@ class EmbedFixPanelSelect(Select):
             discord.SelectOption(label="Stats", value="stats"),
             discord.SelectOption(label="Toggle enabled", value="toggle_enabled"),
             discord.SelectOption(label="Toggle suppression", value="toggle_suppression"),
+            discord.SelectOption(label="Toggle Instagram upload", value="toggle_instagram_upload"),
             discord.SelectOption(label="Reset rules", value="reset_rules"),
         ]
         super().__init__(
@@ -111,6 +139,14 @@ class EmbedFixPanelSelect(Select):
             conf = view.cog.config.guild(view.guild)
             suppress_original = not await conf.suppress_original()
             await conf.suppress_original.set(suppress_original)
+            embed = await view.cog.build_settings_embed(view.guild, view.prefix)
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+
+        if action == "toggle_instagram_upload":
+            conf = view.cog.config.guild(view.guild)
+            instagram_media_upload = not await conf.instagram_media_upload()
+            await conf.instagram_media_upload.set(instagram_media_upload)
             embed = await view.cog.build_settings_embed(view.guild, view.prefix)
             await interaction.response.edit_message(embed=embed, view=view)
             return
@@ -204,18 +240,22 @@ class EmbedFix(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.session = None
         self.last_suppress_notice_at = {}
         self.suppress_retry_tasks = set()
         self.config = Config.get_conf(self, identifier=713902406551, force_registration=True)
         self.config.register_guild(
             enabled=False,
             suppress_original=True,
+            instagram_media_upload=True,
             max_links=3,
             rules=self._default_rules(),
             detection_count=0,
             repost_count=0,
+            media_upload_count=0,
             suppressed_count=0,
             send_error_count=0,
+            media_upload_error_count=0,
             suppress_error_count=0,
         )
 
@@ -230,6 +270,10 @@ class EmbedFix(commands.Cog):
         for task in self.suppress_retry_tasks:
             task.cancel()
         self.suppress_retry_tasks.clear()
+        if self.session is not None and not getattr(self.session, "closed", False):
+            loop = getattr(self.bot, "loop", None)
+            if loop is not None:
+                loop.create_task(self.session.close())
 
     @staticmethod
     def _prefix(ctx: commands.Context) -> str:
@@ -244,6 +288,12 @@ class EmbedFix(commands.Cog):
 
     async def _sleep(self, delay: float):
         await asyncio.sleep(delay)
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self.session is None or getattr(self.session, "closed", False):
+            timeout = aiohttp.ClientTimeout(total=60)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+        return self.session
 
     def _channel_id(self, channel) -> int:
         return getattr(channel, "id", id(channel))
@@ -353,18 +403,22 @@ class EmbedFix(commands.Cog):
         return urls
 
     @classmethod
-    def _rewrite_url(cls, url: str, rules: list[dict]) -> Optional[str]:
+    def _rewrite_url_with_rule(
+        cls,
+        url: str,
+        rules: list[dict],
+    ) -> tuple[Optional[str], Optional[str]]:
         try:
             parsed = urlsplit(url)
         except ValueError:
-            return None
+            return None, None
 
         if parsed.scheme.lower() not in {"http", "https"}:
-            return None
+            return None, None
 
         host = (parsed.hostname or "").strip(".").lower()
         if not host:
-            return None
+            return None, None
 
         for rule in rules:
             if not rule.get("enabled", True):
@@ -383,23 +437,44 @@ class EmbedFix(commands.Cog):
 
             target_host = target_host.strip().lower()
             if host == target_host or host.endswith(f".{target_host}"):
-                return None
+                return None, None
 
-            return urlunsplit(("https", target_host, parsed.path, parsed.query, parsed.fragment))
+            fixed_url = urlunsplit(
+                ("https", target_host, parsed.path, parsed.query, parsed.fragment)
+            )
+            return fixed_url, rule.get("name")
 
-        return None
+        return None, None
+
+    @classmethod
+    def _rewrite_url(cls, url: str, rules: list[dict]) -> Optional[str]:
+        fixed_url, _rule_name = cls._rewrite_url_with_rule(url, rules)
+        return fixed_url
 
     @classmethod
     def _fixed_urls_for_message(cls, text: str, rules: list[dict], max_links: int) -> list[str]:
+        return [
+            fixed_link["fixed_url"]
+            for fixed_link in cls._fixed_links_for_message(text, rules, max_links)
+        ]
+
+    @classmethod
+    def _fixed_links_for_message(cls, text: str, rules: list[dict], max_links: int) -> list[dict]:
         fixed_urls = []
         seen = set()
 
         for url in cls._extract_urls(text):
-            fixed_url = cls._rewrite_url(url, rules)
+            fixed_url, rule_name = cls._rewrite_url_with_rule(url, rules)
             if not fixed_url or fixed_url in seen:
                 continue
 
-            fixed_urls.append(fixed_url)
+            fixed_urls.append(
+                {
+                    "original_url": url,
+                    "fixed_url": fixed_url,
+                    "rule_name": rule_name,
+                }
+            )
             seen.add(fixed_url)
             if len(fixed_urls) >= max_links:
                 break
@@ -457,6 +532,144 @@ class EmbedFix(commands.Cog):
         except discord.HTTPException:
             return
 
+    def _media_filename(self, content_type: str, source_url: str) -> str:
+        ext = VIDEO_EXTENSIONS.get(content_type.split(";")[0].strip().lower())
+        if ext is None:
+            path = urlsplit(source_url).path.lower()
+            for candidate in VIDEO_EXTENSIONS.values():
+                if path.endswith(candidate):
+                    ext = candidate
+                    break
+        return f"instagram-media{ext or '.mp4'}"
+
+    def _is_video_response(self, content_type: str, source_url: str) -> bool:
+        content_type = content_type.split(";")[0].strip().lower()
+        if content_type.startswith("video/"):
+            return True
+        path = urlsplit(source_url).path.lower()
+        return any(path.endswith(ext) for ext in VIDEO_EXTENSIONS.values())
+
+    def _is_media_page_response(self, content_type: str) -> bool:
+        return content_type.split(";")[0].strip().lower() in MEDIA_PAGE_TYPES
+
+    def _extract_video_url_from_html(self, page: str, base_url: str) -> Optional[str]:
+        for match in HTML_TAG_RE.finditer(page):
+            attrs = {
+                key.lower(): html.unescape(value)
+                for key, _quote, value in HTML_ATTR_RE.findall(match.group(0))
+            }
+            stream_url = attrs.get("content")
+            key = attrs.get("property") or attrs.get("name") or attrs.get("itemprop")
+            if key and key.lower() in VIDEO_META_KEYS and stream_url:
+                return urljoin(base_url, stream_url)
+
+            stream_url = attrs.get("src")
+            if stream_url:
+                return urljoin(base_url, stream_url)
+
+        return None
+
+    async def _read_response_bytes(self, response, max_bytes: int) -> Optional[bytes]:
+        data = bytearray()
+        async for chunk in response.content.iter_chunked(MEDIA_CHUNK_SIZE):
+            data.extend(chunk)
+            if len(data) > max_bytes:
+                return None
+        return bytes(data) if data else None
+
+    async def _download_instagram_media(self, url: str) -> Optional[tuple[bytes, str]]:
+        try:
+            return await self._download_instagram_media_url(url, allow_html=True)
+        except (aiohttp.ClientError, AttributeError, ValueError, TypeError, UnicodeDecodeError):
+            return None
+
+    async def _download_instagram_media_url(
+        self,
+        url: str,
+        *,
+        allow_html: bool,
+    ) -> Optional[tuple[bytes, str]]:
+        session = await self._get_session()
+        async with session.get(url, allow_redirects=True) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                return None
+
+            content_type = response.headers.get("Content-Type", "")
+            response_url = str(getattr(response, "url", url))
+            if self._is_video_response(content_type, response_url):
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None and int(content_length) > MAX_MEDIA_UPLOAD_BYTES:
+                    return None
+
+                data = await self._read_response_bytes(response, MAX_MEDIA_UPLOAD_BYTES)
+                if not data:
+                    return None
+                return data, self._media_filename(content_type, response_url)
+
+            if allow_html and self._is_media_page_response(content_type):
+                data = await self._read_response_bytes(response, MAX_MEDIA_PAGE_BYTES)
+                if not data:
+                    return None
+
+                page = data.decode("utf-8", errors="replace")
+                video_url = self._extract_video_url_from_html(page, response_url)
+                if video_url and video_url != response_url:
+                    return await self._download_instagram_media_url(video_url, allow_html=False)
+
+        return None
+
+    async def _send_instagram_media_upload(self, channel, guild, url: str) -> bool:
+        media = await self._download_instagram_media(url)
+        if media is None:
+            await self._increment_guild_counter(guild, "media_upload_error_count")
+            return False
+
+        data, filename = media
+        try:
+            await channel.send(
+                "Instagram media",
+                file=discord.File(io.BytesIO(data), filename=filename),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            await self._increment_guild_counter(guild, "media_upload_error_count")
+            return False
+
+        await self._increment_guild_counter(guild, "media_upload_count")
+        return True
+
+    async def _send_fixed_links(
+        self,
+        channel,
+        guild,
+        fixed_links: list[dict],
+        *,
+        instagram_media_upload: bool,
+    ) -> bool:
+        fallback_urls = []
+        sent_any = False
+
+        for fixed_link in fixed_links:
+            fixed_url = fixed_link["fixed_url"]
+            if (
+                instagram_media_upload
+                and fixed_link.get("rule_name") == INSTAGRAM_RULE_NAME
+                and await self._send_instagram_media_upload(channel, guild, fixed_url)
+            ):
+                sent_any = True
+                continue
+            fallback_urls.append(fixed_url)
+
+        if fallback_urls:
+            await channel.send(
+                "\n".join(fallback_urls),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            sent_any = True
+
+        return sent_any
+
     async def _fresh_message(self, message: discord.Message) -> discord.Message:
         channel = getattr(message, "channel", None)
         message_id = getattr(message, "id", None)
@@ -473,6 +686,30 @@ class EmbedFix(commands.Cog):
 
         return fetched or message
 
+    def _can_retry_suppression(self, message: discord.Message) -> bool:
+        channel = getattr(message, "channel", None)
+        return getattr(message, "id", None) is not None and getattr(
+            channel,
+            "fetch_message",
+            None,
+        ) is not None
+
+    async def _call_suppress_embeds(self, message: discord.Message):
+        edit = getattr(message, "edit", None)
+        if edit is not None:
+            result = edit(suppress=True)
+            if inspect.isawaitable(result):
+                await result
+            return
+
+        suppress_embeds = getattr(message, "suppress_embeds", None)
+        if suppress_embeds is None:
+            raise AttributeError("message does not support embed suppression")
+
+        result = suppress_embeds(True)
+        if inspect.isawaitable(result):
+            await result
+
     async def _suppress_message_embeds(
         self,
         message: discord.Message,
@@ -483,47 +720,66 @@ class EmbedFix(commands.Cog):
         count_error: bool,
     ) -> bool:
         try:
-            suppress_embeds = getattr(message, "suppress_embeds", None)
-            if suppress_embeds is not None:
-                result = suppress_embeds(True)
-                if inspect.isawaitable(result):
-                    await result
-            else:
-                await message.edit(suppress=True)
+            await self._call_suppress_embeds(message)
         except discord.NotFound:
             if count_error:
                 await self._increment_guild_counter(guild, "suppress_error_count")
             return False
-        except (discord.Forbidden, discord.HTTPException):
+        except discord.Forbidden:
             if count_error:
                 await self._increment_guild_counter(guild, "suppress_error_count")
             if warn_on_failure:
                 await self._send_suppress_failure_notice(message)
+            return False
+        except (discord.HTTPException, AttributeError):
+            if count_error:
+                await self._increment_guild_counter(guild, "suppress_error_count")
             return False
 
         if count_success:
             await self._increment_guild_counter(guild, "suppressed_count")
         return True
 
-    async def _retry_suppress_message_embeds(self, message: discord.Message, guild):
+    async def _retry_suppress_message_embeds(
+        self,
+        message: discord.Message,
+        guild,
+        *,
+        count_success: bool,
+    ):
+        success_counted = False
         try:
             for delay in SUPPRESS_RETRY_DELAYS:
                 await self._sleep(delay)
                 fresh_message = await self._fresh_message(message)
-                await self._suppress_message_embeds(
+                suppressed = await self._suppress_message_embeds(
                     fresh_message,
                     guild,
                     warn_on_failure=False,
-                    count_success=False,
+                    count_success=count_success and not success_counted,
                     count_error=False,
                 )
+                if suppressed and count_success:
+                    success_counted = True
         finally:
             current_task = asyncio.current_task()
             if current_task is not None:
                 self.suppress_retry_tasks.discard(current_task)
 
-    def _schedule_suppress_retries(self, message: discord.Message, guild):
-        task = asyncio.create_task(self._retry_suppress_message_embeds(message, guild))
+    def _schedule_suppress_retries(
+        self,
+        message: discord.Message,
+        guild,
+        *,
+        count_success: bool = False,
+    ):
+        task = asyncio.create_task(
+            self._retry_suppress_message_embeds(
+                message,
+                guild,
+                count_success=count_success,
+            )
+        )
         self.suppress_retry_tasks.add(task)
 
     def _rules_message(self, rules: list[dict]) -> str:
@@ -547,6 +803,7 @@ class EmbedFix(commands.Cog):
         conf = self.config.guild(guild)
         enabled = await conf.enabled()
         suppress_original = await conf.suppress_original()
+        instagram_media_upload = await conf.instagram_media_upload()
         max_links = await conf.max_links()
         rules = await self._get_rules(guild)
         enabled_rules = sum(1 for rule in rules if rule.get("enabled", True))
@@ -568,6 +825,7 @@ class EmbedFix(commands.Cog):
         )
         embed.add_field(name="Enabled", value=f"`{enabled}`")
         embed.add_field(name="Original embed suppression", value=f"`{suppress_original}`")
+        embed.add_field(name="Instagram media upload", value=f"`{instagram_media_upload}`")
         embed.add_field(name="Max fixed links per message", value=f"`{max_links}`")
         embed.add_field(name="Rules", value=f"`{enabled_rules}/{len(rules)}` enabled")
         embed.add_field(name="Next step", value=next_step)
@@ -640,11 +898,16 @@ class EmbedFix(commands.Cog):
         )
         embed.add_field(name="Messages detected", value=f"`{await conf.detection_count()}`")
         embed.add_field(name="Reposts sent", value=f"`{await conf.repost_count()}`")
+        embed.add_field(name="Media uploads sent", value=f"`{await conf.media_upload_count()}`")
         embed.add_field(
             name="Original embeds suppressed",
             value=f"`{await conf.suppressed_count()}`",
         )
         embed.add_field(name="Send errors", value=f"`{await conf.send_error_count()}`")
+        embed.add_field(
+            name="Media upload errors",
+            value=f"`{await conf.media_upload_error_count()}`",
+        )
         embed.add_field(name="Suppress errors", value=f"`{await conf.suppress_error_count()}`")
         embed.set_footer(text="Suppress errors usually mean the bot lacks Manage Messages.")
         return embed
@@ -653,6 +916,7 @@ class EmbedFix(commands.Cog):
         conf = self.config.guild(guild)
         enabled = await conf.enabled()
         suppress_original = await conf.suppress_original()
+        instagram_media_upload = await conf.instagram_media_upload()
         max_links = await conf.max_links()
         rules = await self._get_rules(guild)
         next_step = (
@@ -667,6 +931,7 @@ class EmbedFix(commands.Cog):
             "EmbedFix settings\n"
             f"Enabled: `{enabled}`\n"
             f"Suppress original embeds: `{suppress_original}`\n"
+            f"Instagram media upload: `{instagram_media_upload}`\n"
             f"Max fixed links per message: `{max_links}`\n"
             f"Rules configured: `{len(rules)}`\n"
             f"{next_step}"
@@ -689,38 +954,47 @@ class EmbedFix(commands.Cog):
             return
 
         max_links = max(1, min(MAX_LINKS_LIMIT, int(await conf.max_links())))
-        fixed_urls = self._fixed_urls_for_message(
+        fixed_links = self._fixed_links_for_message(
             self._message_text(message),
             await self._get_rules(guild),
             max_links,
         )
-        if not fixed_urls:
+        if not fixed_links:
             return
 
         await self._increment_guild_counter(guild, "detection_count")
 
+        send_failed = False
         try:
-            await message.channel.send(
-                "\n".join(fixed_urls),
-                allowed_mentions=discord.AllowedMentions.none(),
+            sent_fixed = await self._send_fixed_links(
+                message.channel,
+                guild,
+                fixed_links,
+                instagram_media_upload=await conf.instagram_media_upload(),
             )
         except discord.HTTPException:
-            await self._increment_guild_counter(guild, "send_error_count")
-            return
+            sent_fixed = False
+            send_failed = True
 
-        await self._increment_guild_counter(guild, "repost_count")
+        if send_failed or not sent_fixed:
+            await self._increment_guild_counter(guild, "send_error_count")
+        else:
+            await self._increment_guild_counter(guild, "repost_count")
 
         if not await conf.suppress_original():
             return
 
+        suppress_target = await self._fresh_message(message)
         suppressed = await self._suppress_message_embeds(
-            message,
+            suppress_target,
             guild,
             warn_on_failure=True,
             count_success=True,
             count_error=True,
         )
         if not suppressed:
+            if self._can_retry_suppression(message):
+                self._schedule_suppress_retries(message, guild, count_success=True)
             return
 
         self._schedule_suppress_retries(message, guild)
@@ -766,6 +1040,13 @@ class EmbedFix(commands.Cog):
         assert ctx.guild
         await self.config.guild(ctx.guild).suppress_original.set(enabled)
         await ctx.send(f"Original embed suppression set to `{enabled}`.")
+
+    @embedfixset.command(name="instagramupload")
+    async def embedfixset_instagramupload(self, ctx: commands.Context, enabled: bool):
+        """Set whether Instagram media should be uploaded instead of URL-only reposted."""
+        assert ctx.guild
+        await self.config.guild(ctx.guild).instagram_media_upload.set(enabled)
+        await ctx.send(f"Instagram media upload set to `{enabled}`.")
 
     @embedfixset.command(name="maxlinks")
     async def embedfixset_maxlinks(self, ctx: commands.Context, amount: int):
@@ -865,8 +1146,10 @@ class EmbedFix(commands.Cog):
             "EmbedFix stats\n"
             f"Messages detected: `{await conf.detection_count()}`\n"
             f"Reposts sent: `{await conf.repost_count()}`\n"
+            f"Media uploads sent: `{await conf.media_upload_count()}`\n"
             f"Original embeds suppressed: `{await conf.suppressed_count()}`\n"
             f"Send errors: `{await conf.send_error_count()}`\n"
+            f"Media upload errors: `{await conf.media_upload_error_count()}`\n"
             f"Suppress errors: `{await conf.suppress_error_count()}`"
         )
         await ctx.send(message)
