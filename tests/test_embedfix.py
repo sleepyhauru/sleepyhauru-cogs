@@ -47,7 +47,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.cog._rewrite_url("https://www.instagram.com/reel/abc/", rules),
-            "https://toinstagram.com/reel/abc/",
+            "https://d.toinstagram.com/reel/abc/",
         )
         self.assertIsNone(self.cog._rewrite_url("https://example.com/path", rules))
 
@@ -61,7 +61,7 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         migrated = await self.cog._get_rules(guild)
 
         instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
-        self.assertEqual(instagram_rule["target_host"], "toinstagram.com")
+        self.assertEqual(instagram_rule["target_host"], "d.toinstagram.com")
 
     async def test_get_rules_migrates_vxinstagram_default_target(self):
         guild = types.SimpleNamespace(id=34)
@@ -73,7 +73,19 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         migrated = await self.cog._get_rules(guild)
 
         instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
-        self.assertEqual(instagram_rule["target_host"], "toinstagram.com")
+        self.assertEqual(instagram_rule["target_host"], "d.toinstagram.com")
+
+    async def test_get_rules_migrates_toinstagram_default_target(self):
+        guild = types.SimpleNamespace(id=37)
+        rules = self.cog._default_rules()
+        instagram_rule = next(rule for rule in rules if rule["name"] == "instagram")
+        instagram_rule["target_host"] = "toinstagram.com"
+        await self.cog.config.guild(guild).rules.set(rules)
+
+        migrated = await self.cog._get_rules(guild)
+
+        instagram_rule = next(rule for rule in migrated if rule["name"] == "instagram")
+        self.assertEqual(instagram_rule["target_host"], "d.toinstagram.com")
 
     async def test_get_rules_preserves_custom_instagram_target(self):
         guild = types.SimpleNamespace(id=35)
@@ -161,24 +173,33 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         sent = []
         edits = []
         sleeps = []
+        fetched = []
 
         async def send(message, allowed_mentions=None):
             sent.append((message, allowed_mentions))
 
         async def edit(**kwargs):
-            edits.append(kwargs)
+            edits.append(("original", kwargs))
+
+        async def fetched_edit(**kwargs):
+            edits.append(("fetched", kwargs))
 
         async def sleep(delay):
             sleeps.append(delay)
+
+        async def fetch_message(message_id):
+            fetched.append(message_id)
+            return types.SimpleNamespace(edit=fetched_edit)
 
         guild = types.SimpleNamespace(id=32)
         await self._enable(guild.id)
         self.cog._sleep = sleep
         message = types.SimpleNamespace(
+            id=3200,
             author=types.SimpleNamespace(bot=False),
             guild=guild,
             content="https://twitter.com/user/status/123",
-            channel=types.SimpleNamespace(send=send),
+            channel=types.SimpleNamespace(send=send, fetch_message=fetch_message),
             edit=edit,
         )
 
@@ -187,7 +208,16 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tasks)
 
         self.assertEqual(sent, [("https://fixupx.com/user/status/123", "none")])
-        self.assertEqual(edits, [{"suppress": True}, {"suppress": True}, {"suppress": True}])
+        self.assertEqual(
+            edits,
+            [
+                ("original", {"suppress": True}),
+                ("fetched", {"suppress": True}),
+                ("fetched", {"suppress": True}),
+                ("fetched", {"suppress": True}),
+            ],
+        )
+        self.assertEqual(fetched, [3200, 3200, 3200])
         self.assertEqual(sleeps, list(embedfix_module.SUPPRESS_RETRY_DELAYS))
         self.assertEqual(self.cog.suppress_retry_tasks, set())
         conf = self.cog.config.guild(guild)
@@ -215,6 +245,30 @@ class EmbedFixTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(await self.cog.config.guild(guild).suppress_error_count(), 0)
+
+    async def test_suppress_message_uses_suppress_embeds_method_when_available(self):
+        guild = types.SimpleNamespace(id=36)
+        calls = []
+
+        async def suppress_embeds(value):
+            calls.append(value)
+
+        async def edit(**kwargs):
+            raise AssertionError("edit should not be used when suppress_embeds exists")
+
+        message = types.SimpleNamespace(suppress_embeds=suppress_embeds, edit=edit)
+
+        result = await self.cog._suppress_message_embeds(
+            message,
+            guild,
+            warn_on_failure=False,
+            count_success=True,
+            count_error=True,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [True])
+        self.assertEqual(await self.cog.config.guild(guild).suppressed_count(), 1)
 
     async def test_listener_does_not_suppress_when_send_fails(self):
         edits = []

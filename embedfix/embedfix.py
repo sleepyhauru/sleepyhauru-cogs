@@ -16,9 +16,9 @@ RULE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.IGNORECASE)
 TRAILING_PUNCTUATION = ".,!?;:"
 MAX_LINKS_LIMIT = 10
 SUPPRESS_NOTICE_COOLDOWN_SECONDS = 600
-SUPPRESS_RETRY_DELAYS = (2.0, 8.0)
-INSTAGRAM_TARGET_HOST = "toinstagram.com"
-LEGACY_INSTAGRAM_TARGET_HOSTS = {"ddinstagram.com", "vxinstagram.com"}
+SUPPRESS_RETRY_DELAYS = (2.0, 8.0, 20.0)
+INSTAGRAM_TARGET_HOST = "d.toinstagram.com"
+LEGACY_INSTAGRAM_TARGET_HOSTS = {"ddinstagram.com", "vxinstagram.com", "toinstagram.com"}
 
 DEFAULT_RULES = (
     {
@@ -457,6 +457,22 @@ class EmbedFix(commands.Cog):
         except discord.HTTPException:
             return
 
+    async def _fresh_message(self, message: discord.Message) -> discord.Message:
+        channel = getattr(message, "channel", None)
+        message_id = getattr(message, "id", None)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if channel is None or message_id is None or fetch_message is None:
+            return message
+
+        try:
+            fetched = fetch_message(message_id)
+            if inspect.isawaitable(fetched):
+                fetched = await fetched
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return message
+
+        return fetched or message
+
     async def _suppress_message_embeds(
         self,
         message: discord.Message,
@@ -467,7 +483,13 @@ class EmbedFix(commands.Cog):
         count_error: bool,
     ) -> bool:
         try:
-            await message.edit(suppress=True)
+            suppress_embeds = getattr(message, "suppress_embeds", None)
+            if suppress_embeds is not None:
+                result = suppress_embeds(True)
+                if inspect.isawaitable(result):
+                    await result
+            else:
+                await message.edit(suppress=True)
         except discord.NotFound:
             if count_error:
                 await self._increment_guild_counter(guild, "suppress_error_count")
@@ -487,8 +509,9 @@ class EmbedFix(commands.Cog):
         try:
             for delay in SUPPRESS_RETRY_DELAYS:
                 await self._sleep(delay)
+                fresh_message = await self._fresh_message(message)
                 await self._suppress_message_embeds(
-                    message,
+                    fresh_message,
                     guild,
                     warn_on_failure=False,
                     count_success=False,
