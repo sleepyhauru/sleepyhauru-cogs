@@ -1,0 +1,23 @@
+{
+  "author": [
+    "shiro"
+  ],
+  "description": "Owner-controlled Red cog that connects whitelisted Discord channels to a local Ollama server.",
+  "disabled": false,
+  "end_user_data_statement": "This cog stores owner-configured settings and bounded recent per-channel conversation context in Red's Config. It sends prompts and recent context only to the configured Ollama base URL.",
+  "install_msg": "OllamaChat installed. Load the cog, whitelist a channel with `[p]ollamaset channel add`, and check `[p]ollama status`.",
+  "min_bot_version": "3.5.0",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ],
+  "requirements": [],
+  "short": "Chat with a local Ollama server from whitelisted Discord channels.",
+  "tags": [
+    "ai",
+    "chat",
+    "ollama"
+  ],
+  "type": "COG"
+}
