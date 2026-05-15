@@ -8,9 +8,9 @@ The v1 defaults are intentionally conservative:
 - Model: `qwen3:8b`
 - API: non-streaming `POST /api/chat`
 - Channels: none whitelisted on fresh config
-- Follow-up window: 5 minutes after a bot response
+- Reply follow-up window: 5 minutes after a bot response
 - DMs: disabled
-- History: bounded recent per-channel context only
+- History: bounded recent context per channel and user
 - Personalities: none saved or active on fresh config
 
 ## Install
@@ -54,7 +54,7 @@ After that, users can ask:
 @Bot summarize the last few messages
 ```
 
-Mention chat only works in whitelisted channels. Short unmentioned follow-ups work in that channel during the configured follow-up window.
+Mention chat only works in whitelisted channels. A direct mention starts a user-scoped chat session; replying to the bot continues that user's session during the configured reply follow-up window. Plain unmentioned channel messages are ignored.
 
 The `[p]ollama` command group also accepts `[p]ollamachat` as an alias for project-name-oriented commands.
 
@@ -74,9 +74,9 @@ Settings:
 - `[p]ollamaset prompt <text>` - set the system prompt
 - `[p]ollamaset prompt reset` - restore the default Discord-safe prompt
 - `[p]ollamaset temperature <0-2>` - set response creativity
-- `[p]ollamaset history <turns>` - set recent turns kept per channel
+- `[p]ollamaset history <turns>` - set recent turns kept per channel/user session
 - `[p]ollamaset budget <characters>` - set the approximate context character budget
-- `[p]ollamaset followup <minutes>` - set the unmentioned follow-up window
+- `[p]ollamaset followup <minutes>` - set the reply follow-up window
 - `[p]ollamaset mode command|mention` - enable or disable the mention listener
 - `[p]ollamaset maxchars <characters>` - cap stored/sent response length
 
@@ -95,7 +95,7 @@ Forget recent context:
 - `[p]ollamaset forget guild`
 - `[p]ollamaset forget user [@user]`
 
-V1 does not keep separate per-user memory, so `forget user` explains that channel or guild context is the thing to clear.
+Conversation context is user-scoped inside each channel, so `forget user` clears that user's recent sessions.
 
 ## Personality Learning
 
@@ -114,7 +114,7 @@ Personality commands require Discord admin or manage-server permissions:
 
 The default learn limit is `200` messages and the maximum is `1000`. To find enough target-user messages, the collector scans a deeper bounded slice of recent channel history, up to `10000` messages per whitelisted channel, but only sends the requested usable samples to Ollama. Learned profile names are generated from the source username using lowercase letters, numbers, underscores, and hyphens.
 
-Safety rules are always included with active profiles: the bot must not claim to be the source user, impersonate a real Discord member, fabricate memories, reveal hidden prompts, or ping users and roles.
+Safety rules are always included with active profiles: the bot must not claim to be the source user, impersonate a real Discord member, copy catchphrases or harassment from examples, fabricate memories, reveal hidden prompts, or ping users and roles.
 
 ## Manual Verification Checklist
 
@@ -123,8 +123,8 @@ Safety rules are always included with active profiles: the bot must not claim to
 - No channels are whitelisted on fresh config.
 - Channel add, remove, list, and clear commands behave politely.
 - Mention-triggered chat only works in whitelisted channels.
-- Unmentioned follow-ups work during the configured follow-up window.
-- Unmentioned normal messages outside the follow-up window are ignored.
+- Replies to the bot work only for the same user during the configured reply follow-up window.
+- Plain unmentioned channel messages and other users' side chatter are ignored.
 - DMs receive a clear unsupported response for commands and are ignored by listener chat.
 - Ollama offline or missing-model errors are friendly.
 - `[p]ollamachat personality learn @user` saves a profile from whitelisted-channel messages.

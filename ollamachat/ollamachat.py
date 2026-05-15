@@ -35,6 +35,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful local assistant in a private Discord server. "
     "Keep replies concise, friendly, and safe for Discord. "
     "User messages may be prefixed with Discord display names. "
+    "Respond only to the user who invoked you in the current chat session. "
     "Do not create mass mentions such as @everyone or @here."
 )
 DEFAULT_TIMEOUT_SECONDS = 90
@@ -43,6 +44,7 @@ DEFAULT_CONTEXT_CHAR_BUDGET = 12000
 DEFAULT_FOLLOWUP_SECONDS = 300
 DEFAULT_MAX_RESPONSE_CHARS = 6000
 CUSTOM_CHANNEL_HISTORY = "CHANNEL_HISTORY"
+CUSTOM_USER_HISTORY = "USER_HISTORY"
 NO_MENTIONS = discord.AllowedMentions.none()
 
 
@@ -69,11 +71,14 @@ class OllamaChat(commands.Cog):
             max_response_chars=DEFAULT_MAX_RESPONSE_CHARS,
             whitelisted_channels=[],
             history_channels=[],
+            history_sessions=[],
             personalities={},
             active_personality=None,
         )
         self.config.init_custom(CUSTOM_CHANNEL_HISTORY, 2)
         self.config.register_custom(CUSTOM_CHANNEL_HISTORY, history=[], last_followup=0.0)
+        self.config.init_custom(CUSTOM_USER_HISTORY, 3)
+        self.config.register_custom(CUSTOM_USER_HISTORY, history=[], last_followup=0.0)
         self._locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     @commands.command(name="ai")
@@ -130,7 +135,7 @@ class OllamaChat(commands.Cog):
             f"Base URL: `{settings['base_url']}`\n"
             f"Model: `{settings['model']}`\n"
             f"Trigger mode: `{mode}` (commands always require a whitelisted channel)\n"
-            f"Follow-up window: `{followup_minutes:g}` minute(s)\n"
+            f"Reply follow-up window: `{followup_minutes:g}` minute(s)\n"
             f"Temperature: `{settings['temperature']}`\n"
             f"History limit: `{settings['history_limit']}` turn(s)\n"
             f"Context budget: `{settings['context_char_budget']}` characters\n"
@@ -408,7 +413,7 @@ class OllamaChat(commands.Cog):
 
     @ollamaset_group.command(name="history")
     async def set_history_limit(self, ctx: commands.Context, turns: int) -> None:
-        """Set how many recent user/assistant turns are kept per channel."""
+        """Set how many recent user/assistant turns are kept per user session."""
         if not await self._ensure_guild(ctx):
             return
         if turns < 0 or turns > 40:
@@ -430,15 +435,15 @@ class OllamaChat(commands.Cog):
 
     @ollamaset_group.command(name="followup")
     async def set_followup(self, ctx: commands.Context, minutes: float) -> None:
-        """Set the unmentioned follow-up window in minutes."""
+        """Set the reply follow-up window in minutes."""
         if not await self._ensure_guild(ctx):
             return
         if minutes < 0 or minutes > 120:
-            await ctx.send("Follow-up window should be between `0` and `120` minutes.", allowed_mentions=NO_MENTIONS)
+            await ctx.send("Reply follow-up window should be between `0` and `120` minutes.", allowed_mentions=NO_MENTIONS)
             return
         seconds = int(minutes * 60)
         await self.config.guild(ctx.guild).followup_window_seconds.set(seconds)
-        await ctx.send(f"Follow-up window set to `{minutes:g}` minute(s).", allowed_mentions=NO_MENTIONS)
+        await ctx.send(f"Reply follow-up window set to `{minutes:g}` minute(s).", allowed_mentions=NO_MENTIONS)
 
     @ollamaset_group.command(name="mode")
     async def set_trigger_mode(self, ctx: commands.Context, mode: str = "") -> None:
@@ -557,7 +562,7 @@ class OllamaChat(commands.Cog):
         target = await self._resolve_channel(ctx, channel)
         if target is None:
             return
-        await self._clear_channel_history(ctx.guild.id, target.id)
+        await self._clear_channel_sessions(ctx.guild, target.id)
         await ctx.send(f"Recent OllamaChat context cleared for {target.mention}.", allowed_mentions=NO_MENTIONS)
 
     @forget_group.command(name="guild")
@@ -570,6 +575,7 @@ class OllamaChat(commands.Cog):
         for channel_id in channel_ids:
             await self._clear_channel_history(ctx.guild.id, int(channel_id))
         await guild_conf.history_channels.set([])
+        await self._clear_guild_user_sessions(ctx.guild)
         await ctx.send("Recent OllamaChat context cleared for this guild.", allowed_mentions=NO_MENTIONS)
 
     @forget_group.command(name="user")
@@ -578,13 +584,13 @@ class OllamaChat(commands.Cog):
         ctx: commands.Context,
         user: Optional[discord.Member] = None,
     ) -> None:
-        """Explain v1 user data behavior."""
+        """Clear recent context for one user. Defaults to you."""
         if not await self._ensure_guild(ctx):
             return
         target = user or ctx.author
+        await self._clear_user_sessions(ctx.guild, target.id)
         await ctx.send(
-            f"OllamaChat v1 does not keep separate user memory for {target.mention}. "
-            "It only stores bounded recent channel context; use `forget channel` or `forget guild` to clear it.",
+            f"Recent OllamaChat context cleared for {target.mention}.",
             allowed_mentions=NO_MENTIONS,
         )
 
@@ -602,17 +608,25 @@ class OllamaChat(commands.Cog):
             return
 
         mentioned = self._mentions_bot(message)
+        replied_to_bot = await self._is_reply_to_bot(message)
         if mentioned:
             prompt = self._strip_bot_mentions(message.content).strip()
-        else:
-            if not await self._has_active_followup(message.guild.id, message.channel.id, settings):
+        elif replied_to_bot:
+            if not await self._has_active_followup(
+                message.guild.id,
+                message.channel.id,
+                message.author.id,
+                settings,
+            ):
                 return
             prompt = message.content.strip()
+        else:
+            return
 
         if not prompt:
-            if mentioned:
+            if mentioned or replied_to_bot:
                 await message.channel.send(
-                    "Mention me with a question or prompt and I will ask Ollama.",
+                    "Mention or reply to me with a question or prompt and I will ask Ollama.",
                     allowed_mentions=NO_MENTIONS,
                 )
             return
@@ -670,7 +684,12 @@ class OllamaChat(commands.Cog):
         async with lock:
             settings = await self.config.guild(guild).all()
             system_prompt = self._build_system_prompt(settings)
-            channel_conf = self.config.custom(CUSTOM_CHANNEL_HISTORY, str(guild.id), str(channel.id))
+            session_conf = self.config.custom(
+                CUSTOM_USER_HISTORY,
+                str(guild.id),
+                str(channel.id),
+                str(author.id),
+            )
             user_content = make_user_content(author.display_name, prompt)
             history_budget = max(
                 0,
@@ -679,7 +698,7 @@ class OllamaChat(commands.Cog):
                 - len(user_content),
             )
             history = trim_history(
-                await channel_conf.history(),
+                await session_conf.history(),
                 max_turns=int(settings["history_limit"]),
                 char_budget=history_budget,
             )
@@ -717,9 +736,9 @@ class OllamaChat(commands.Cog):
                 max_turns=int(settings["history_limit"]),
                 char_budget=int(settings["context_char_budget"]),
             )
-            await channel_conf.history.set(updated_history)
-            await channel_conf.last_followup.set(time.time())
-            await self._track_history_channel(guild, channel.id)
+            await session_conf.history.set(updated_history)
+            await session_conf.last_followup.set(time.time())
+            await self._track_history_session(guild, channel.id, author.id)
 
     async def collect_user_messages(
         self,
@@ -852,12 +871,18 @@ class OllamaChat(commands.Cog):
         self,
         guild_id: int,
         channel_id: int,
+        user_id: int,
         settings: dict,
     ) -> bool:
         window = int(settings["followup_window_seconds"])
         if window <= 0:
             return False
-        last_followup = await self.config.custom(CUSTOM_CHANNEL_HISTORY, str(guild_id), str(channel_id)).last_followup()
+        last_followup = await self.config.custom(
+            CUSTOM_USER_HISTORY,
+            str(guild_id),
+            str(channel_id),
+            str(user_id),
+        ).last_followup()
         return bool(last_followup and time.time() - float(last_followup) <= window)
 
     async def _format_whitelisted_channels(self, guild: discord.Guild) -> str:
@@ -881,6 +906,23 @@ class OllamaChat(commands.Cog):
         for chunk in split_discord_messages(text):
             await destination.send(chunk, allowed_mentions=NO_MENTIONS)
 
+    async def _track_history_session(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        user_id: int,
+    ) -> None:
+        guild_conf = self.config.guild(guild)
+        sessions = await guild_conf.history_sessions()
+        if not isinstance(sessions, list):
+            sessions = []
+
+        normalized = self._normalize_history_sessions(sessions)
+        session = {"channel_id": channel_id, "user_id": user_id}
+        if session not in normalized:
+            normalized.append(session)
+            await guild_conf.history_sessions.set(normalized)
+
     async def _track_history_channel(self, guild: discord.Guild, channel_id: int) -> None:
         guild_conf = self.config.guild(guild)
         channel_ids = await guild_conf.history_channels()
@@ -888,10 +930,72 @@ class OllamaChat(commands.Cog):
             channel_ids.append(channel_id)
             await guild_conf.history_channels.set(channel_ids)
 
+    async def _clear_channel_sessions(self, guild: discord.Guild, channel_id: int) -> None:
+        await self._clear_channel_history(guild.id, channel_id)
+        guild_conf = self.config.guild(guild)
+        sessions = self._normalize_history_sessions(await guild_conf.history_sessions())
+        remaining = []
+        for session in sessions:
+            if session["channel_id"] == channel_id:
+                await self._clear_user_history(guild.id, channel_id, session["user_id"])
+            else:
+                remaining.append(session)
+        await guild_conf.history_sessions.set(remaining)
+
+    async def _clear_user_sessions(self, guild: discord.Guild, user_id: int) -> None:
+        guild_conf = self.config.guild(guild)
+        sessions = self._normalize_history_sessions(await guild_conf.history_sessions())
+        remaining = []
+        for session in sessions:
+            if session["user_id"] == user_id:
+                await self._clear_user_history(guild.id, session["channel_id"], user_id)
+            else:
+                remaining.append(session)
+        await guild_conf.history_sessions.set(remaining)
+
+    async def _clear_guild_user_sessions(self, guild: discord.Guild) -> None:
+        guild_conf = self.config.guild(guild)
+        sessions = self._normalize_history_sessions(await guild_conf.history_sessions())
+        for session in sessions:
+            await self._clear_user_history(guild.id, session["channel_id"], session["user_id"])
+        await guild_conf.history_sessions.set([])
+
     async def _clear_channel_history(self, guild_id: int, channel_id: int) -> None:
         channel_conf = self.config.custom(CUSTOM_CHANNEL_HISTORY, str(guild_id), str(channel_id))
         await channel_conf.history.set([])
         await channel_conf.last_followup.set(0.0)
+
+    async def _clear_user_history(self, guild_id: int, channel_id: int, user_id: int) -> None:
+        session_conf = self.config.custom(
+            CUSTOM_USER_HISTORY,
+            str(guild_id),
+            str(channel_id),
+            str(user_id),
+        )
+        await session_conf.history.set([])
+        await session_conf.last_followup.set(0.0)
+
+    def _normalize_history_sessions(self, sessions: object) -> list[dict[str, int]]:
+        if not isinstance(sessions, list):
+            return []
+
+        normalized: list[dict[str, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            try:
+                channel_id = int(session["channel_id"])
+                user_id = int(session["user_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            key = (channel_id, user_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"channel_id": channel_id, "user_id": user_id})
+        return normalized
 
     def _get_lock(self, guild_id: int, channel_id: int) -> asyncio.Lock:
         key = (guild_id, channel_id)
@@ -909,6 +1013,33 @@ class OllamaChat(commands.Cog):
             return content
         pattern = rf"<@!?{re.escape(str(self.bot.user.id))}>"
         return re.sub(pattern, "", content)
+
+    async def _is_reply_to_bot(self, message: discord.Message) -> bool:
+        if not self.bot.user:
+            return False
+
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return False
+
+        for candidate in (
+            getattr(message, "referenced_message", None),
+            getattr(reference, "resolved", None),
+        ):
+            author = getattr(candidate, "author", None)
+            if getattr(author, "id", None) == self.bot.user.id:
+                return True
+
+        message_id = getattr(reference, "message_id", None)
+        if message_id is None or not hasattr(message.channel, "fetch_message"):
+            return False
+
+        try:
+            referenced = await message.channel.fetch_message(message_id)
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            return False
+
+        return getattr(getattr(referenced, "author", None), "id", None) == self.bot.user.id
 
     async def _is_command_message(self, message: discord.Message) -> bool:
         try:
