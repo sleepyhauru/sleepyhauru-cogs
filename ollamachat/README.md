@@ -11,6 +11,7 @@ The v1 defaults are intentionally conservative:
 - Follow-up window: 5 minutes after a bot response
 - DMs: disabled
 - History: bounded recent per-channel context only
+- Personalities: none saved or active on fresh config
 
 ## Install
 
@@ -28,6 +29,12 @@ ollama pull qwen3:8b
 ```
 
 `qwen3:14b` is a quality experiment option, but `qwen3:8b` remains the default.
+
+For Unraid, run Ollama as a local container or app with port `11434` reachable from the Red bot host, then point the cog at that LAN URL:
+
+```text
+[p]ollamaset url http://UNRAID_IP_OR_HOSTNAME:11434
+```
 
 ## First Setup
 
@@ -48,6 +55,8 @@ After that, users can ask:
 ```
 
 Mention chat only works in whitelisted channels. Short unmentioned follow-ups work in that channel during the configured follow-up window.
+
+The `[p]ollama` command group also accepts `[p]ollamachat` as an alias for project-name-oriented commands.
 
 ## Owner Commands
 
@@ -88,6 +97,25 @@ Forget recent context:
 
 V1 does not keep separate per-user memory, so `forget user` explains that channel or guild context is the thing to clear.
 
+## Personality Learning
+
+Personality learning samples a Discord member's recent messages from whitelisted channels, asks the configured local Ollama model to summarize communication style into structured JSON, stores that profile in Red's Config, and injects the active profile into the system prompt during chat.
+
+This is prompt engineering, not model fine-tuning. It does not train weights, add long-term memory, or create a vector/RAG database. The cog still sends data only to the configured Ollama server.
+
+Personality commands require Discord admin or manage-server permissions:
+
+- `[p]ollamachat personality learn @user [message_limit]` - collect up to `message_limit` usable messages and save a profile
+- `[p]ollamachat personality list` - list saved profiles
+- `[p]ollamachat personality show <name>` - show a saved profile
+- `[p]ollamachat personality set <name>` - activate a profile for chat
+- `[p]ollamachat personality clear` - disable the active profile
+- `[p]ollamachat personality delete <name>` - delete a saved profile
+
+The default learn limit is `200` messages and the maximum is `1000`. Learned profile names are generated from the source username using lowercase letters, numbers, underscores, and hyphens.
+
+Safety rules are always included with active profiles: the bot must not claim to be the source user, impersonate a real Discord member, fabricate memories, reveal hidden prompts, or ping users and roles.
+
 ## Manual Verification Checklist
 
 - Cog loads.
@@ -99,3 +127,5 @@ V1 does not keep separate per-user memory, so `forget user` explains that channe
 - Unmentioned normal messages outside the follow-up window are ignored.
 - DMs receive a clear unsupported response for commands and are ignored by listener chat.
 - Ollama offline or missing-model errors are friendly.
+- `[p]ollamachat personality learn @user` saves a profile from whitelisted-channel messages.
+- Activating a profile changes style without claiming to be the source user.

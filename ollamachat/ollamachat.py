@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -12,6 +13,19 @@ from redbot.core.bot import Red
 from .client import OllamaClient, OllamaClientError, normalize_base_url
 from .formatters import split_discord_messages, truncate_response
 from .history import build_ollama_messages, make_user_content, trim_history
+from .personality import (
+    DEFAULT_ANALYSIS_MESSAGE_LIMIT,
+    MAX_ANALYSIS_MESSAGES,
+    MIN_ANALYSIS_MESSAGES,
+    PersonalityProfileError,
+    build_personality_analysis_messages,
+    clean_message_sample,
+    format_personality_display,
+    format_personality_prompt_block,
+    parse_personality_profile,
+    unique_personality_name,
+    validate_personality_name,
+)
 
 
 DEFAULT_BASE_URL = "http://localhost:11434"
@@ -54,6 +68,8 @@ class OllamaChat(commands.Cog):
             max_response_chars=DEFAULT_MAX_RESPONSE_CHARS,
             whitelisted_channels=[],
             history_channels=[],
+            personalities={},
+            active_personality=None,
         )
         self.config.init_custom(CUSTOM_CHANNEL_HISTORY, 2)
         self.config.register_custom(CUSTOM_CHANNEL_HISTORY, history=[], last_followup=0.0)
@@ -64,7 +80,7 @@ class OllamaChat(commands.Cog):
         """Ask the configured local Ollama model."""
         await self._handle_prompt(ctx, prompt)
 
-    @commands.group(name="ollama", invoke_without_command=True)
+    @commands.group(name="ollama", aliases=["ollamachat"], invoke_without_command=True)
     async def ollama_group(self, ctx: commands.Context) -> None:
         """Chat with or inspect the local Ollama connection."""
         if ctx.invoked_subcommand is None:
@@ -105,6 +121,8 @@ class OllamaChat(commands.Cog):
         channels = await self._format_whitelisted_channels(ctx.guild)
         mode = settings["trigger_mode"]
         followup_minutes = int(settings["followup_window_seconds"]) / 60
+        personalities = settings.get("personalities") or {}
+        active_personality = settings.get("active_personality") or "none"
         message = (
             "**OllamaChat status**\n"
             f"Connection: {connection} ({connection_detail})\n"
@@ -116,6 +134,7 @@ class OllamaChat(commands.Cog):
             f"History limit: `{settings['history_limit']}` turn(s)\n"
             f"Context budget: `{settings['context_char_budget']}` characters\n"
             f"Max response: `{settings['max_response_chars']}` characters\n"
+            f"Personalities: `{len(personalities)}` stored, active `{active_personality}`\n"
             f"Whitelisted channels: {channels}"
         )
         await self._send_text(ctx.channel, message)
@@ -144,6 +163,187 @@ class OllamaChat(commands.Cog):
             return
 
         await self._send_text(ctx.channel, "**Available Ollama models**\n" + "\n".join(f"- `{name}`" for name in models))
+
+    @ollama_group.group(name="personality", aliases=["persona"], invoke_without_command=True)
+    @commands.has_permissions(manage_guild=True)
+    async def personality_group(self, ctx: commands.Context) -> None:
+        """Learn and manage OllamaChat personality profiles."""
+        if ctx.invoked_subcommand is None:
+            if not await self._ensure_guild(ctx):
+                return
+            await ctx.send_help()
+
+    @personality_group.command(name="learn")
+    @commands.has_permissions(manage_guild=True)
+    async def personality_learn(
+        self,
+        ctx: commands.Context,
+        target: discord.Member,
+        message_limit: int = DEFAULT_ANALYSIS_MESSAGE_LIMIT,
+    ) -> None:
+        """Analyze a member's whitelisted-channel messages and save a profile."""
+        if not await self._ensure_guild(ctx):
+            return
+        if target.bot:
+            await ctx.send("I cannot learn a useful personality from bot messages.", allowed_mentions=NO_MENTIONS)
+            return
+        if message_limit < MIN_ANALYSIS_MESSAGES or message_limit > MAX_ANALYSIS_MESSAGES:
+            await ctx.send(
+                f"Message limit should be between `{MIN_ANALYSIS_MESSAGES}` and `{MAX_ANALYSIS_MESSAGES}`.",
+                allowed_mentions=NO_MENTIONS,
+            )
+            return
+
+        whitelisted_channels = await self.config.guild(ctx.guild).whitelisted_channels()
+        if not whitelisted_channels:
+            await ctx.send(
+                "No channels are whitelisted yet. Add one with `[p]ollamaset channel add` before learning a profile.",
+                allowed_mentions=NO_MENTIONS,
+            )
+            return
+
+        async with ctx.typing():
+            samples = await self.collect_user_messages(ctx.guild, target, message_limit)
+            if len(samples) < MIN_ANALYSIS_MESSAGES:
+                await ctx.send(
+                    f"I found `{len(samples)}` usable message(s) from {target.mention}; "
+                    f"I need at least `{MIN_ANALYSIS_MESSAGES}` from whitelisted channels.",
+                    allowed_mentions=NO_MENTIONS,
+                )
+                return
+
+            try:
+                generated = await self.generate_personality_profile(ctx.guild, samples)
+            except OllamaClientError as exc:
+                await ctx.send(f"Ollama could not generate a personality profile: {exc}", allowed_mentions=NO_MENTIONS)
+                return
+
+        guild_conf = self.config.guild(ctx.guild)
+        personalities = await guild_conf.personalities()
+        if not isinstance(personalities, dict):
+            personalities = {}
+
+        profile_name = unique_personality_name(target.name, personalities)
+        profile = {
+            **generated,
+            "name": profile_name,
+            "source_user_id": target.id,
+            "source_username": str(target),
+            "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "message_count": len(samples),
+        }
+        personalities[profile_name] = profile
+        await guild_conf.personalities.set(personalities)
+
+        await ctx.send(
+            f"Saved personality `{profile_name}` from `{len(samples)}` message(s). "
+            f"Activate it with `[p]ollamachat personality set {profile_name}`.",
+            allowed_mentions=NO_MENTIONS,
+        )
+
+    @personality_group.command(name="list")
+    @commands.has_permissions(manage_guild=True)
+    async def personality_list(self, ctx: commands.Context) -> None:
+        """List stored personality profiles."""
+        if not await self._ensure_guild(ctx):
+            return
+
+        settings = await self.config.guild(ctx.guild).all()
+        personalities = settings.get("personalities") or {}
+        active = settings.get("active_personality")
+        if not personalities:
+            await ctx.send("No OllamaChat personalities are saved yet.", allowed_mentions=NO_MENTIONS)
+            return
+
+        lines = ["**OllamaChat personalities**"]
+        for name in sorted(personalities):
+            marker = " (active)" if name == active else ""
+            profile = personalities.get(name) or {}
+            count = profile.get("message_count", 0) if isinstance(profile, dict) else 0
+            lines.append(f"- `{name}`{marker} - `{count}` message(s)")
+        await self._send_text(ctx.channel, "\n".join(lines))
+
+    @personality_group.command(name="show")
+    @commands.has_permissions(manage_guild=True)
+    async def personality_show(self, ctx: commands.Context, name: str) -> None:
+        """Show a stored personality profile."""
+        if not await self._ensure_guild(ctx):
+            return
+
+        try:
+            profile_name = validate_personality_name(name)
+        except PersonalityProfileError as exc:
+            await ctx.send(str(exc), allowed_mentions=NO_MENTIONS)
+            return
+
+        personalities = await self.config.guild(ctx.guild).personalities()
+        profile = personalities.get(profile_name) if isinstance(personalities, dict) else None
+        if not isinstance(profile, dict):
+            await ctx.send(f"I do not have a personality named `{profile_name}`.", allowed_mentions=NO_MENTIONS)
+            return
+
+        try:
+            display = format_personality_display(profile_name, profile)
+        except PersonalityProfileError as exc:
+            await ctx.send(f"That personality is malformed: {exc}", allowed_mentions=NO_MENTIONS)
+            return
+        await self._send_text(ctx.channel, display)
+
+    @personality_group.command(name="set", aliases=["activate"])
+    @commands.has_permissions(manage_guild=True)
+    async def personality_set(self, ctx: commands.Context, name: str) -> None:
+        """Activate a stored personality profile."""
+        if not await self._ensure_guild(ctx):
+            return
+
+        try:
+            profile_name = validate_personality_name(name)
+        except PersonalityProfileError as exc:
+            await ctx.send(str(exc), allowed_mentions=NO_MENTIONS)
+            return
+
+        personalities = await self.config.guild(ctx.guild).personalities()
+        if not isinstance(personalities, dict) or profile_name not in personalities:
+            await ctx.send(f"I do not have a personality named `{profile_name}`.", allowed_mentions=NO_MENTIONS)
+            return
+
+        await self.config.guild(ctx.guild).active_personality.set(profile_name)
+        await ctx.send(f"Active OllamaChat personality set to `{profile_name}`.", allowed_mentions=NO_MENTIONS)
+
+    @personality_group.command(name="clear")
+    @commands.has_permissions(manage_guild=True)
+    async def personality_clear(self, ctx: commands.Context) -> None:
+        """Clear the active personality profile."""
+        if not await self._ensure_guild(ctx):
+            return
+        await self.config.guild(ctx.guild).active_personality.set(None)
+        await ctx.send("Active OllamaChat personality cleared.", allowed_mentions=NO_MENTIONS)
+
+    @personality_group.command(name="delete", aliases=["remove"])
+    @commands.has_permissions(manage_guild=True)
+    async def personality_delete(self, ctx: commands.Context, name: str) -> None:
+        """Delete a stored personality profile."""
+        if not await self._ensure_guild(ctx):
+            return
+
+        try:
+            profile_name = validate_personality_name(name)
+        except PersonalityProfileError as exc:
+            await ctx.send(str(exc), allowed_mentions=NO_MENTIONS)
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        personalities = await guild_conf.personalities()
+        if not isinstance(personalities, dict) or profile_name not in personalities:
+            await ctx.send(f"I do not have a personality named `{profile_name}`.", allowed_mentions=NO_MENTIONS)
+            return
+
+        del personalities[profile_name]
+        await guild_conf.personalities.set(personalities)
+        if await guild_conf.active_personality() == profile_name:
+            await guild_conf.active_personality.set(None)
+
+        await ctx.send(f"Deleted personality `{profile_name}`.", allowed_mentions=NO_MENTIONS)
 
     @commands.group(name="ollamaset", invoke_without_command=True)
     @commands.is_owner()
@@ -468,12 +668,13 @@ class OllamaChat(commands.Cog):
 
         async with lock:
             settings = await self.config.guild(guild).all()
+            system_prompt = self._build_system_prompt(settings)
             channel_conf = self.config.custom(CUSTOM_CHANNEL_HISTORY, str(guild.id), str(channel.id))
             user_content = make_user_content(author.display_name, prompt)
             history_budget = max(
                 0,
                 int(settings["context_char_budget"])
-                - len(settings["system_prompt"])
+                - len(system_prompt)
                 - len(user_content),
             )
             history = trim_history(
@@ -482,7 +683,7 @@ class OllamaChat(commands.Cog):
                 char_budget=history_budget,
             )
             messages = build_ollama_messages(
-                system_prompt=settings["system_prompt"],
+                system_prompt=system_prompt,
                 history=history,
                 user_content=user_content,
             )
@@ -518,6 +719,107 @@ class OllamaChat(commands.Cog):
             await channel_conf.history.set(updated_history)
             await channel_conf.last_followup.set(time.time())
             await self._track_history_channel(guild, channel.id)
+
+    async def collect_user_messages(
+        self,
+        guild: discord.Guild,
+        target: discord.Member,
+        limit: int,
+    ) -> list[str]:
+        """Collect clean recent messages from whitelisted channels for one member."""
+        channel_ids = await self.config.guild(guild).whitelisted_channels()
+        collected: list[tuple[float, str]] = []
+        seen: set[str] = set()
+
+        for channel_id in channel_ids:
+            channel = guild.get_channel(int(channel_id))
+            if not isinstance(channel, discord.TextChannel):
+                continue
+
+            try:
+                async for message in channel.history(limit=limit):
+                    if message.author.id != target.id or message.author.bot:
+                        continue
+                    if await self._is_command_message(message):
+                        continue
+
+                    cleaned = clean_message_sample(message.content)
+                    if cleaned is None:
+                        continue
+
+                    spam_key = cleaned.casefold()
+                    if spam_key in seen:
+                        continue
+
+                    seen.add(spam_key)
+                    collected.append((message.created_at.timestamp(), cleaned))
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+        selected = sorted(collected, key=lambda item: item[0], reverse=True)[:limit]
+        selected.sort(key=lambda item: item[0])
+        return [content for _, content in selected]
+
+    async def generate_personality_profile(
+        self,
+        guild: discord.Guild,
+        messages: list[str],
+    ) -> dict:
+        """Ask Ollama to turn message samples into a safe structured profile."""
+        settings = await self.config.guild(guild).all()
+        client = OllamaClient(
+            settings["base_url"],
+            timeout_seconds=float(settings["timeout_seconds"]),
+        )
+        analysis_messages = build_personality_analysis_messages(messages)
+        last_error: Optional[Exception] = None
+
+        for attempt in range(2):
+            response = await client.chat(
+                model=settings["model"],
+                messages=analysis_messages,
+                temperature=0.2,
+            )
+            try:
+                return parse_personality_profile(response)
+            except PersonalityProfileError as exc:
+                last_error = exc
+                if attempt == 0:
+                    analysis_messages.extend(
+                        [
+                            {"role": "assistant", "content": response[:4000]},
+                            {
+                                "role": "user",
+                                "content": "Return ONLY valid JSON using the required structure. Do not include markdown.",
+                            },
+                        ]
+                    )
+
+        detail = f": {last_error}" if last_error else ""
+        raise OllamaClientError(f"Ollama returned an invalid personality profile{detail}")
+
+    async def build_system_prompt(self, guild: discord.Guild) -> str:
+        """Build the current chat system prompt, including any active personality."""
+        settings = await self.config.guild(guild).all()
+        return self._build_system_prompt(settings)
+
+    def _build_system_prompt(self, settings: dict) -> str:
+        base_prompt = str(settings.get("system_prompt") or DEFAULT_SYSTEM_PROMPT).strip()
+        personalities = settings.get("personalities") or {}
+        active = settings.get("active_personality")
+        if not isinstance(personalities, dict) or not isinstance(active, str):
+            return base_prompt
+
+        profile = personalities.get(active)
+        if not isinstance(profile, dict):
+            return base_prompt
+
+        try:
+            personality_block = format_personality_prompt_block(profile)
+        except PersonalityProfileError:
+            return base_prompt
+
+        return f"{base_prompt}\n\n{personality_block}"
 
     async def _ensure_guild(self, ctx: commands.Context) -> bool:
         if ctx.guild is not None:
@@ -605,3 +907,10 @@ class OllamaChat(commands.Cog):
             return content
         pattern = rf"<@!?{re.escape(str(self.bot.user.id))}>"
         return re.sub(pattern, "", content)
+
+    async def _is_command_message(self, message: discord.Message) -> bool:
+        try:
+            context = await self.bot.get_context(message)
+        except Exception:
+            return False
+        return bool(getattr(context, "valid", False))
