@@ -112,7 +112,7 @@ Personality commands require Discord admin or manage-server permissions:
 - `[p]ollamachat personality clear` - disable the active profile
 - `[p]ollamachat personality delete <name>` - delete a saved profile
 
-The default learn limit is `200` messages and the maximum is `1000`. Learned profile names are generated from the source username using lowercase letters, numbers, underscores, and hyphens.
+The default learn limit is `200` messages and the maximum is `1000`. To find enough target-user messages, the collector scans a deeper bounded slice of recent channel history, up to `10000` messages per whitelisted channel, but only sends the requested usable samples to Ollama. Learned profile names are generated from the source username using lowercase letters, numbers, underscores, and hyphens.
 
 Safety rules are always included with active profiles: the bot must not claim to be the source user, impersonate a real Discord member, fabricate memories, reveal hidden prompts, or ping users and roles.
 

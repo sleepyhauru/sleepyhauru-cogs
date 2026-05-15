@@ -11,6 +11,9 @@ DEFAULT_ANALYSIS_MESSAGE_LIMIT = 200
 MIN_ANALYSIS_MESSAGES = 10
 MAX_PROFILE_ITEMS = 20
 MAX_ANALYSIS_CHARS = 40000
+PERSONALITY_HISTORY_SCAN_MULTIPLIER = 25
+MIN_PERSONALITY_HISTORY_SCAN = 1000
+MAX_PERSONALITY_HISTORY_SCAN = 10000
 
 PERSONALITY_NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
@@ -119,6 +122,12 @@ def build_personality_analysis_messages(samples: list[str]) -> list[dict[str, st
         {"role": "system", "content": PERSONALITY_ANALYSIS_SYSTEM_PROMPT},
         {"role": "user", "content": content},
     ]
+
+
+def personality_history_scan_limit(target_message_limit: int) -> int:
+    scaled_limit = target_message_limit * PERSONALITY_HISTORY_SCAN_MULTIPLIER
+    bounded_limit = max(MIN_PERSONALITY_HISTORY_SCAN, scaled_limit)
+    return min(MAX_PERSONALITY_HISTORY_SCAN, bounded_limit)
 
 
 def parse_personality_profile(text: str) -> dict[str, Any]:

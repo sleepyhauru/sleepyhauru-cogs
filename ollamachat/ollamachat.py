@@ -22,6 +22,7 @@ from .personality import (
     clean_message_sample,
     format_personality_display,
     format_personality_prompt_block,
+    personality_history_scan_limit,
     parse_personality_profile,
     unique_personality_name,
     validate_personality_name,
@@ -728,6 +729,7 @@ class OllamaChat(commands.Cog):
     ) -> list[str]:
         """Collect clean recent messages from whitelisted channels for one member."""
         channel_ids = await self.config.guild(guild).whitelisted_channels()
+        scan_limit = personality_history_scan_limit(limit)
         collected: list[tuple[float, str]] = []
         seen: set[str] = set()
 
@@ -737,7 +739,7 @@ class OllamaChat(commands.Cog):
                 continue
 
             try:
-                async for message in channel.history(limit=limit):
+                async for message in channel.history(limit=scan_limit):
                     if message.author.id != target.id or message.author.bot:
                         continue
                     if await self._is_command_message(message):
