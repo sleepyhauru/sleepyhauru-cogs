@@ -113,6 +113,36 @@ class RemojiHelpersTest(unittest.TestCase):
             )
         )
 
+    def test_optimize_animated_image_prefers_smooth_candidate(self):
+        class FakeFrame:
+            mode = "RGB"
+            size = (128, 128)
+            info = {"duration": 40}
+
+            def convert(self, _mode):
+                return self
+
+        image = types.SimpleNamespace(frames=[FakeFrame()], info={"duration": 40})
+        image_sequence = types.SimpleNamespace(Iterator=lambda img: iter(img.frames))
+
+        def save_candidate(_frames, _durations, **kwargs):
+            key = (kwargs["frame_step"], kwargs["max_side"], kwargs["colors"])
+            if key == (8, 128, 256):
+                return b"laggy"
+            if key == (2, 96, 32):
+                return b"smooth"
+            return None
+
+        with patch.object(remoji, "_save_animated_gif_candidate", side_effect=save_candidate):
+            result = remoji._optimize_animated_image(
+                image,
+                Image=object(),
+                ImageSequence=image_sequence,
+                limit=remoji.DISCORD_EMOJI_SIZE_LIMIT,
+            )
+
+        self.assertEqual(result, b"smooth")
+
 
 class RemojiDownloadTest(unittest.IsolatedAsyncioTestCase):
     async def test_download_image_url_rejects_invalid_url_and_domain(self):

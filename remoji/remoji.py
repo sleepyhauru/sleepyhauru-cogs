@@ -18,6 +18,7 @@ EMOJI_MAX_SIDE = 128
 GIF_RESIZE_SIDES = (EMOJI_MAX_SIDE, 112, 96, 80, 72, 64, 56, 48)
 GIF_COLOR_COUNTS = (256, 128, 96, 64, 48, 32)
 GIF_FRAME_STEPS = (1, 2, 3, 4, 5, 6, 8, 10, 12)
+GIF_MIN_SMOOTH_SIDE = 80
 BATCH_PROGRESS_INTERVAL = 5
 BATCH_UPLOAD_DELAY = 0.25
 ALLOWED_IMAGE_HOSTS = {"cdn.discordapp.com", "media.discordapp.net", "i.imgur.com"}
@@ -257,20 +258,26 @@ def _optimize_animated_image(image, Image, ImageSequence, limit: int) -> Optiona
         return None
 
     reserve_transparency = any(_image_has_transparency(frame) for frame in frames)
-    for max_side in GIF_RESIZE_SIDES:
-        for colors in GIF_COLOR_COUNTS:
-            for frame_step in GIF_FRAME_STEPS:
-                candidate = _save_animated_gif_candidate(
-                    frames,
-                    durations,
-                    max_side=max_side,
-                    colors=colors,
-                    frame_step=frame_step,
-                    reserve_transparency=reserve_transparency,
-                    Image=Image,
-                )
-                if candidate is not None and len(candidate) <= limit:
-                    return candidate
+    # Keep animations smooth before falling back to tiny outputs.
+    side_passes = (
+        tuple(side for side in GIF_RESIZE_SIDES if side >= GIF_MIN_SMOOTH_SIDE),
+        tuple(side for side in GIF_RESIZE_SIDES if side < GIF_MIN_SMOOTH_SIDE),
+    )
+    for sides in side_passes:
+        for frame_step in GIF_FRAME_STEPS:
+            for max_side in sides:
+                for colors in GIF_COLOR_COUNTS:
+                    candidate = _save_animated_gif_candidate(
+                        frames,
+                        durations,
+                        max_side=max_side,
+                        colors=colors,
+                        frame_step=frame_step,
+                        reserve_transparency=reserve_transparency,
+                        Image=Image,
+                    )
+                    if candidate is not None and len(candidate) <= limit:
+                        return candidate
     return None
 
 
