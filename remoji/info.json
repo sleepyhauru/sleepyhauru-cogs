@@ -7,7 +7,7 @@
     "disabled": false,
     "install_msg": "Load it with `[p]load remoji`. Use `[p]remoji upload <url> <name>`, `[p]remoji copy <emoji> [name]`, and `[p]remoji copymany <emojis...>`. You can also reply to a message with `[p]remoji copy`, `[p]remoji copymany`, or `[p]remoji url`. To enable slash and message context commands, run `[p]slash enablecog remoji` and `[p]slash sync`. Use `[p]remojiset allowuser <user>` to allow uploads without Manage Emojis.",
     "required_cogs": {},
-    "requirements": [],
+    "requirements": ["pillow"],
     "short": "Upload and copy custom Discord emojis.",
     "end_user_data_statement": "This cog does not store any user data.",
     "tags": ["emoji", "emote", "copy", "upload", "remoji"],

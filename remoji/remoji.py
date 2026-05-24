@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Union
@@ -12,6 +13,11 @@ from redbot.core import Config, app_commands, commands
 
 
 DISCORD_EMOJI_SIZE_LIMIT = 256 * 1024
+MAX_IMAGE_DOWNLOAD_SIZE = 8 * 1024 * 1024
+EMOJI_MAX_SIDE = 128
+GIF_RESIZE_SIDES = (EMOJI_MAX_SIDE, 112, 96, 80, 72, 64, 56, 48)
+GIF_COLOR_COUNTS = (256, 128, 96, 64, 48, 32)
+GIF_FRAME_STEPS = (1, 2, 3, 4, 5, 6, 8, 10, 12)
 BATCH_PROGRESS_INTERVAL = 5
 BATCH_UPLOAD_DELAY = 0.25
 ALLOWED_IMAGE_HOSTS = {"cdn.discordapp.com", "media.discordapp.net", "i.imgur.com"}
@@ -121,11 +127,206 @@ def image_download_is_animated(url: str, download: ImageDownload) -> bool:
     )
 
 
+def _pillow_resample_filter(Image):
+    resampling = getattr(Image, "Resampling", None)
+    if resampling is not None and hasattr(resampling, "LANCZOS"):
+        return resampling.LANCZOS
+    return getattr(Image, "LANCZOS", getattr(Image, "BILINEAR", 1))
+
+
+def _pillow_adaptive_palette(Image):
+    palette = getattr(Image, "Palette", None)
+    if palette is not None and hasattr(palette, "ADAPTIVE"):
+        return palette.ADAPTIVE
+    return getattr(Image, "ADAPTIVE", 1)
+
+
+def _resize_image_to_side(image, max_side: int, Image):
+    width, height = image.size
+    largest = max(width, height)
+    if largest <= max_side:
+        return image.copy()
+
+    scale = max_side / largest
+    size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return image.resize(size, resample=_pillow_resample_filter(Image))
+
+
+def _duration_for_frame(frame, fallback: int) -> int:
+    try:
+        return max(20, int(frame.info.get("duration", fallback) or fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _image_has_transparency(image) -> bool:
+    if image.mode in {"RGBA", "LA"}:
+        return image.getchannel("A").getextrema()[0] < 255
+    if image.mode == "P":
+        return "transparency" in image.info
+    return False
+
+
+def _palettize_gif_frame(frame, colors: int, reserve_transparency: bool, Image):
+    rgba = frame.convert("RGBA")
+    transparent_index = max(1, min(255, colors - 1))
+    color_count = transparent_index if reserve_transparency else colors
+    paletted = rgba.convert("RGB").convert(
+        "P",
+        palette=_pillow_adaptive_palette(Image),
+        colors=color_count,
+    )
+
+    if not reserve_transparency:
+        return paletted
+
+    palette = paletted.getpalette() or []
+    palette.extend([0] * (768 - len(palette)))
+    palette[transparent_index * 3 : transparent_index * 3 + 3] = [0, 0, 0]
+    paletted.putpalette(palette[:768])
+
+    alpha = rgba.getchannel("A")
+    if alpha.getextrema()[0] < 255:
+        mask = alpha.point(lambda value: 255 if value <= 16 else 0)
+        paletted.paste(transparent_index, mask)
+    paletted.info["transparency"] = transparent_index
+    return paletted
+
+
+def _save_animated_gif_candidate(
+    frames,
+    durations: list[int],
+    *,
+    max_side: int,
+    colors: int,
+    frame_step: int,
+    reserve_transparency: bool,
+    Image,
+) -> Optional[bytes]:
+    selected_frames = frames[::frame_step]
+    if not selected_frames:
+        return None
+
+    selected_durations = [
+        sum(durations[index : index + frame_step])
+        for index in range(0, len(durations), frame_step)
+    ][: len(selected_frames)]
+
+    prepared = [
+        _palettize_gif_frame(
+            _resize_image_to_side(frame, max_side, Image),
+            colors,
+            reserve_transparency,
+            Image,
+        )
+        for frame in selected_frames
+    ]
+    output = io.BytesIO()
+    save_kwargs = {
+        "format": "GIF",
+        "save_all": True,
+        "append_images": prepared[1:],
+        "duration": selected_durations,
+        "loop": 0,
+        "optimize": True,
+        "disposal": 2,
+    }
+    if reserve_transparency:
+        save_kwargs["transparency"] = max(1, min(255, colors - 1))
+
+    try:
+        prepared[0].save(output, **save_kwargs)
+    except Exception:
+        return None
+    return output.getvalue()
+
+
+def _optimize_animated_image(image, Image, ImageSequence, limit: int) -> Optional[bytes]:
+    fallback_duration = _duration_for_frame(image, 80)
+    frames = []
+    durations = []
+    try:
+        iterator = ImageSequence.Iterator(image)
+        for frame in iterator:
+            frames.append(frame.convert("RGBA"))
+            durations.append(_duration_for_frame(frame, fallback_duration))
+    except Exception:
+        return None
+
+    if not frames:
+        return None
+
+    reserve_transparency = any(_image_has_transparency(frame) for frame in frames)
+    for max_side in GIF_RESIZE_SIDES:
+        for colors in GIF_COLOR_COUNTS:
+            for frame_step in GIF_FRAME_STEPS:
+                candidate = _save_animated_gif_candidate(
+                    frames,
+                    durations,
+                    max_side=max_side,
+                    colors=colors,
+                    frame_step=frame_step,
+                    reserve_transparency=reserve_transparency,
+                    Image=Image,
+                )
+                if candidate is not None and len(candidate) <= limit:
+                    return candidate
+    return None
+
+
+def _save_static_candidate(image, Image, *, max_side: int, colors: int) -> Optional[bytes]:
+    resized = _resize_image_to_side(image.convert("RGBA"), max_side, Image)
+    output = io.BytesIO()
+    try:
+        if _image_has_transparency(resized):
+            candidate = _palettize_gif_frame(resized, colors, True, Image)
+            candidate.save(output, format="PNG", optimize=True)
+        else:
+            candidate = resized.convert("RGB").convert(
+                "P",
+                palette=_pillow_adaptive_palette(Image),
+                colors=colors,
+            )
+            candidate.save(output, format="PNG", optimize=True)
+    except Exception:
+        return None
+    return output.getvalue()
+
+
+def _optimize_static_image(image, Image, limit: int) -> Optional[bytes]:
+    for max_side in GIF_RESIZE_SIDES:
+        for colors in GIF_COLOR_COUNTS:
+            candidate = _save_static_candidate(image, Image, max_side=max_side, colors=colors)
+            if candidate is not None and len(candidate) <= limit:
+                return candidate
+    return None
+
+
+def optimize_image_for_emoji(data: bytes, limit: int = DISCORD_EMOJI_SIZE_LIMIT) -> Optional[bytes]:
+    if len(data) <= limit:
+        return data
+
+    try:
+        from PIL import Image, ImageSequence
+    except Exception:
+        return None
+
+    try:
+        image = Image.open(io.BytesIO(data))
+    except Exception:
+        return None
+
+    is_animated = bool(getattr(image, "is_animated", False) or getattr(image, "n_frames", 1) > 1)
+    if is_animated:
+        return _optimize_animated_image(image, Image, ImageSequence, limit)
+    return _optimize_static_image(image, Image, limit)
+
+
 class Remoji(commands.Cog):
     """Upload and copy custom Discord emojis."""
 
     __author__ = ["sleepyhauru"]
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"
 
     def __init__(self, bot):
         super().__init__()
@@ -162,12 +363,19 @@ class Remoji(commands.Cog):
             self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
-    async def _read_response_under_limit(self, resp) -> tuple[Optional[bytes], Optional[str]]:
+    async def _optimize_image_for_emoji(self, data: bytes) -> Optional[bytes]:
+        return await asyncio.to_thread(optimize_image_for_emoji, data)
+
+    async def _read_response_under_limit(
+        self,
+        resp,
+        limit: int = DISCORD_EMOJI_SIZE_LIMIT,
+    ) -> tuple[Optional[bytes], Optional[str]]:
         content = getattr(resp, "content", None)
         iter_chunked = getattr(content, "iter_chunked", None)
         if not callable(iter_chunked):
             data = await resp.read()
-            if len(data) > DISCORD_EMOJI_SIZE_LIMIT:
+            if len(data) > limit:
                 return None, IMAGE_TOO_LARGE
             return data, None
 
@@ -175,7 +383,7 @@ class Remoji(commands.Cog):
         total = 0
         async for chunk in iter_chunked(64 * 1024):
             total += len(chunk)
-            if total > DISCORD_EMOJI_SIZE_LIMIT:
+            if total > limit:
                 return None, IMAGE_TOO_LARGE
             chunks.append(chunk)
         return b"".join(chunks), None
@@ -198,12 +406,17 @@ class Remoji(commands.Cog):
                     return ImageDownload(None, INVALID_TYPE)
 
                 content_length = resp.headers.get("Content-Length")
-                if content_length and int(content_length) > DISCORD_EMOJI_SIZE_LIMIT:
+                if content_length and int(content_length) > MAX_IMAGE_DOWNLOAD_SIZE:
                     return ImageDownload(None, IMAGE_TOO_LARGE)
 
-                data, error = await self._read_response_under_limit(resp)
+                data, error = await self._read_response_under_limit(resp, MAX_IMAGE_DOWNLOAD_SIZE)
                 if error:
                     return ImageDownload(None, error)
+                if data and len(data) > DISCORD_EMOJI_SIZE_LIMIT:
+                    optimized = await self._optimize_image_for_emoji(data)
+                    if not optimized:
+                        return ImageDownload(None, IMAGE_TOO_LARGE)
+                    data = optimized
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
             return ImageDownload(None, f"{DOWNLOAD_FAILED} {type(error).__name__}: {error}")
 

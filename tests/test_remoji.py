@@ -140,6 +140,40 @@ class RemojiDownloadTest(unittest.IsolatedAsyncioTestCase):
         body = b"x" * (remoji.DISCORD_EMOJI_SIZE_LIMIT + 1)
         cog.session = FakeSession({url: FakeResponse(body=body)})
 
+        with patch.object(cog, "_optimize_image_for_emoji", AsyncMock(return_value=None)):
+            result = await cog._download_image_url(url)
+
+        self.assertIsNone(result.data)
+        self.assertEqual(result.error, remoji.IMAGE_TOO_LARGE)
+
+    async def test_download_image_url_optimizes_oversized_body(self):
+        cog = remoji.Remoji(bot=object())
+        url = "https://cdn.discordapp.com/emojis/123.gif"
+        body = b"x" * (remoji.DISCORD_EMOJI_SIZE_LIMIT + 1)
+        cog.session = FakeSession({url: FakeResponse(body=body, headers={"Content-Type": "image/gif"})})
+
+        with patch.object(cog, "_optimize_image_for_emoji", AsyncMock(return_value=b"small-gif")) as optimizer:
+            result = await cog._download_image_url(url)
+
+        self.assertEqual(result.data, b"small-gif")
+        self.assertEqual(result.content_type, "image/gif")
+        optimizer.assert_awaited_once_with(body)
+
+    async def test_download_image_url_rejects_too_large_download(self):
+        cog = remoji.Remoji(bot=object())
+        url = "https://cdn.discordapp.com/emojis/123.gif"
+        cog.session = FakeSession(
+            {
+                url: FakeResponse(
+                    headers={
+                        "Content-Type": "image/gif",
+                        "Content-Length": str(remoji.MAX_IMAGE_DOWNLOAD_SIZE + 1),
+                    },
+                    body=b"",
+                )
+            }
+        )
+
         result = await cog._download_image_url(url)
 
         self.assertIsNone(result.data)
