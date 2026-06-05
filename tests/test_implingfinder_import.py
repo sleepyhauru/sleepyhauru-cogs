@@ -99,6 +99,45 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.message_id, 222)
         self.assertEqual(cog.config._global_store["active_messages"], {})
 
+    async def test_process_migrates_legacy_active_message_key_for_current_sighting(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        deleted = []
+
+        class PartialMessage:
+            async def delete(self):
+                deleted.append(222)
+
+        class Channel:
+            def get_partial_message(self, _message_id):
+                return PartialMessage()
+
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: Channel())
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.dedupe_key: {"111": 222}}
+        }
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [1644]},
+            [spawn],
+        )
+
+        self.assertEqual(deleted, [])
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {spawn.sighting_key: {"111": 222}}},
+        )
+
     async def test_process_records_sent_message_for_active_spawn(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -129,7 +168,48 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, [(spawn, True)])
         self.assertEqual(
             cog.config._global_store["active_messages"],
-            {"123": {spawn.dedupe_key: {"111": 333}}},
+            {"123": {spawn.sighting_key: {"111": 333}}},
+        )
+
+    async def test_process_posts_one_message_for_duplicate_moving_rows(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        older = module.ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1282,
+            ycoord=3155,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        newer = module.ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1289,
+            ycoord=3158,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: object())
+        sent = []
+
+        async def send_spawn(_guild, _channel, received_spawn, *, screenshots):
+            sent.append(received_spawn)
+            return types.SimpleNamespace(id=444 + len(sent))
+
+        cog._send_spawn_to_channel = send_spawn
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": True, "screenshots": False},
+            {"111": [1642]},
+            [newer, older],
+        )
+
+        self.assertEqual(sent, [newer])
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {newer.sighting_key: {"111": 445}}},
         )
 
 

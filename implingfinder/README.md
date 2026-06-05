@@ -86,9 +86,9 @@ Pillow is optional and is not listed as a required dependency.
 
 ## Duplicate and Despawn Handling
 
-Each spawn is deduplicated by NPC ID, world, coordinates, plane, and discovered timestamp. The cog stores those keys per Discord server so the same backend row is not posted again on later polls.
+Each sighting is deduplicated by NPC ID, world, plane, and coarse map area. The backend can report the same moving impling several times with slightly different coordinates or timestamps, so the cog keeps the newest row for each area and avoids posting the older nearby rows as duplicates.
 
-When a tracked spawn disappears from the latest successful backend response, the cog deletes the Discord message it posted for that spawn and removes the stored message ID. Messages are kept for retry if Discord rejects the delete because of permissions or a transient API error.
+When a tracked sighting disappears from the latest successful backend response, the cog deletes the Discord message it posted for that sighting and removes the stored message ID. Messages are kept for retry if Discord rejects the delete because of permissions or a transient API error.
 
 For competitive hunting, set the interval to the minimum:
 

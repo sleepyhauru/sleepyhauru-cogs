@@ -7,6 +7,7 @@ from implingfinder.core import (
     ImplingSpawn,
     build_map_url,
     build_id_endpoint,
+    collapse_duplicate_sightings,
     filter_stale_spawns,
     matching_channel_ids,
     parse_backend_payload,
@@ -35,6 +36,75 @@ class ImplingFinderCoreTest(unittest.TestCase):
         )
 
         self.assertEqual(spawn.dedupe_key, "1644:489:3210:3420:0:1715000000")
+
+    def test_sighting_key_groups_nearby_moving_impling_rows(self):
+        first = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1289,
+            ycoord=3158,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_000, timezone.utc),
+        )
+        moved = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1282,
+            ycoord=3155,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_030, timezone.utc),
+        )
+        crossed_bucket_boundary = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1259,
+            ycoord=3160,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_040, timezone.utc),
+        )
+        elsewhere = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1360,
+            ycoord=3158,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_060, timezone.utc),
+        )
+
+        self.assertEqual(first.sighting_key, moved.sighting_key)
+        self.assertEqual(first.sighting_key, crossed_bucket_boundary.sighting_key)
+        self.assertNotEqual(first.sighting_key, elsewhere.sighting_key)
+
+    def test_collapse_duplicate_sightings_keeps_latest_row_per_region(self):
+        older = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1282,
+            ycoord=3155,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_000, timezone.utc),
+        )
+        newer = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1289,
+            ycoord=3158,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_030, timezone.utc),
+        )
+        separate = ImplingSpawn(
+            npcid=1642,
+            world=324,
+            xcoord=1360,
+            ycoord=3158,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_000_060, timezone.utc),
+        )
+
+        self.assertEqual(
+            collapse_duplicate_sightings([older, newer, separate]),
+            [separate, newer],
+        )
 
     def test_parse_backend_payload_reads_items_and_ignores_unknown_implings(self):
         payload = {
@@ -157,12 +227,12 @@ class ImplingFinderCoreTest(unittest.TestCase):
         to_announce, updated_seen = select_unseen_spawns([spawn], [], announce_existing=False)
 
         self.assertEqual(to_announce, [])
-        self.assertEqual(updated_seen, [spawn.dedupe_key])
+        self.assertEqual(updated_seen, [spawn.sighting_key])
 
         to_announce, updated_seen = select_unseen_spawns([spawn], [], announce_existing=True)
 
         self.assertEqual(to_announce, [spawn])
-        self.assertEqual(updated_seen, [spawn.dedupe_key])
+        self.assertEqual(updated_seen, [spawn.sighting_key])
 
     def test_sanitize_endpoint_url_requires_https(self):
         self.assertEqual(sanitize_endpoint_url(DEFAULT_ENDPOINT), DEFAULT_ENDPOINT)

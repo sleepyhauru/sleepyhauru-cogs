@@ -23,6 +23,7 @@ from .core import (
     MIN_POLL_INTERVAL_SECONDS,
     build_id_endpoint,
     build_map_url,
+    collapse_duplicate_sightings,
     explv_tiles_for_crop,
     filter_stale_spawns,
     format_age,
@@ -32,6 +33,7 @@ from .core import (
     parse_impling_types,
     sanitize_endpoint_url,
     select_unseen_spawns,
+    sighting_key_from_legacy_dedupe_key,
 )
 from .core import ImplingSpawn
 
@@ -186,12 +188,14 @@ class ImplingFinder(commands.Cog):
     ) -> None:
         now = datetime.now(timezone.utc)
         max_age = max(0, int(settings.get("max_age_seconds", DEFAULT_MAX_AGE_SECONDS)))
-        current_spawn_keys = {spawn.dedupe_key for spawn in spawns}
-        await self._delete_missing_active_messages(guild, current_spawn_keys)
+        current_sighting_keys = {spawn.sighting_key for spawn in spawns}
+        await self._delete_missing_active_messages(guild, current_sighting_keys)
+        await self._clear_missing_seen_sightings(guild, current_sighting_keys)
 
         fresh_spawns = filter_stale_spawns(spawns, now, max_age)
+        unique_spawns = collapse_duplicate_sightings(fresh_spawns)
         routed_spawns = [
-            spawn for spawn in reversed(fresh_spawns) if matching_channel_ids(channels, spawn)
+            spawn for spawn in reversed(unique_spawns) if matching_channel_ids(channels, spawn)
         ]
         if not routed_spawns:
             return
@@ -227,7 +231,7 @@ class ImplingFinder(commands.Cog):
     async def _delete_missing_active_messages(
         self,
         guild: discord.Guild,
-        current_spawn_keys: set[str],
+        current_sighting_keys: set[str],
     ) -> None:
         guild_key = str(guild.id)
         async with self.config.active_messages() as active_messages:
@@ -238,7 +242,18 @@ class ImplingFinder(commands.Cog):
                 return
 
             for spawn_key, channel_messages in list(guild_messages.items()):
-                if spawn_key in current_spawn_keys:
+                migrated_key = self._current_sighting_key(spawn_key, current_sighting_keys)
+                if migrated_key is not None and migrated_key != spawn_key:
+                    if isinstance(channel_messages, dict):
+                        migrated_messages = guild_messages.get(migrated_key)
+                        if not isinstance(migrated_messages, dict):
+                            migrated_messages = {}
+                            guild_messages[migrated_key] = migrated_messages
+                        migrated_messages.update(channel_messages)
+                    guild_messages.pop(spawn_key, None)
+                    continue
+
+                if spawn_key in current_sighting_keys:
                     continue
 
                 if not isinstance(channel_messages, dict):
@@ -254,6 +269,32 @@ class ImplingFinder(commands.Cog):
 
             if not guild_messages:
                 active_messages.pop(guild_key, None)
+
+    async def _clear_missing_seen_sightings(
+        self,
+        guild: discord.Guild,
+        current_sighting_keys: set[str],
+    ) -> None:
+        guild_key = str(guild.id)
+        async with self.config.seen() as seen:
+            current_seen = list(seen.get(guild_key, []))
+            normalized_seen: list[str] = []
+            normalized_set: set[str] = set()
+            for key in current_seen:
+                current_key = self._current_sighting_key(str(key), current_sighting_keys)
+                if current_key is None or current_key in normalized_set:
+                    continue
+                normalized_seen.append(current_key)
+                normalized_set.add(current_key)
+            seen[guild_key] = normalized_seen
+
+    def _current_sighting_key(self, key: str, current_sighting_keys: set[str]) -> str | None:
+        if key in current_sighting_keys:
+            return key
+        legacy_key = sighting_key_from_legacy_dedupe_key(key)
+        if legacy_key in current_sighting_keys:
+            return legacy_key
+        return None
 
     async def _delete_tracked_message(
         self,
@@ -324,10 +365,10 @@ class ImplingFinder(commands.Cog):
                 guild_messages = {}
                 active_messages[guild_key] = guild_messages
 
-            spawn_messages = guild_messages.get(spawn.dedupe_key)
+            spawn_messages = guild_messages.get(spawn.sighting_key)
             if not isinstance(spawn_messages, dict):
                 spawn_messages = {}
-                guild_messages[spawn.dedupe_key] = spawn_messages
+                guild_messages[spawn.sighting_key] = spawn_messages
 
             spawn_messages[clean_channel_id] = clean_message_id
 

@@ -18,6 +18,7 @@ MIN_POLL_INTERVAL_SECONDS = 10
 DEFAULT_POLL_INTERVAL_SECONDS = 30
 DEFAULT_MAX_AGE_SECONDS = 15 * 60
 DEFAULT_MAP_ZOOM = 7
+SIGHTING_REGION_SIZE = 128
 EXPLV_TILE_BASE_URL = "https://raw.githubusercontent.com/Explv/osrs_map_tiles/master"
 EXPLV_MIN_ZOOM = 4
 EXPLV_MAX_ZOOM = 11
@@ -78,6 +79,12 @@ class ImplingSpawn:
         return f"{self.npcid}:{self.world}:{self.xcoord}:{self.ycoord}:{self.plane}:{epoch}"
 
     @property
+    def sighting_key(self) -> str:
+        region_x = sighting_region(self.xcoord)
+        region_y = sighting_region(self.ycoord)
+        return f"{self.npcid}:{self.world}:{self.plane}:{region_x}:{region_y}"
+
+    @property
     def type_key(self) -> str | None:
         return NPC_ID_TO_TYPE.get(self.npcid)
 
@@ -109,6 +116,10 @@ def parse_discovered_epoch(value: Any) -> datetime:
     except (TypeError, ValueError) as exc:
         raise ValueError("discoveredtime must be Unix epoch seconds") from exc
     return datetime.fromtimestamp(epoch, timezone.utc)
+
+
+def sighting_region(coord: int) -> int:
+    return (int(coord) + SIGHTING_REGION_SIZE // 2) // SIGHTING_REGION_SIZE
 
 
 def parse_impling_types(values: Sequence[str] | Iterable[str]) -> list[str]:
@@ -187,6 +198,19 @@ def filter_stale_spawns(
     ]
 
 
+def collapse_duplicate_sightings(spawns: Iterable[ImplingSpawn]) -> list[ImplingSpawn]:
+    newest_by_sighting: dict[str, ImplingSpawn] = {}
+    for spawn in spawns:
+        current = newest_by_sighting.get(spawn.sighting_key)
+        if current is None or spawn.discovered > current.discovered:
+            newest_by_sighting[spawn.sighting_key] = spawn
+    return sorted(
+        newest_by_sighting.values(),
+        key=lambda spawn: spawn.discovered,
+        reverse=True,
+    )
+
+
 def matching_channel_ids(channels: Mapping[str, Sequence[int]], spawn: ImplingSpawn) -> list[int]:
     channel_ids: list[int] = []
     for raw_channel_id, npc_ids in channels.items():
@@ -211,7 +235,7 @@ def select_unseen_spawns(
     first_run = not updated
 
     for spawn in spawns:
-        key = spawn.dedupe_key
+        key = spawn.sighting_key
         if key in seen:
             continue
 
@@ -221,6 +245,23 @@ def select_unseen_spawns(
             to_announce.append(spawn)
 
     return to_announce, trim_seen_keys(updated)
+
+
+def sighting_key_from_legacy_dedupe_key(value: str) -> str | None:
+    parts = str(value).split(":")
+    if len(parts) != 6:
+        return None
+    try:
+        npcid = int(parts[0])
+        world = int(parts[1])
+        xcoord = int(parts[2])
+        ycoord = int(parts[3])
+        plane = int(parts[4])
+    except ValueError:
+        return None
+    region_x = sighting_region(xcoord)
+    region_y = sighting_region(ycoord)
+    return f"{npcid}:{world}:{plane}:{region_x}:{region_y}"
 
 
 def build_map_url(spawn: ImplingSpawn, *, zoom: int = DEFAULT_MAP_ZOOM) -> str:
