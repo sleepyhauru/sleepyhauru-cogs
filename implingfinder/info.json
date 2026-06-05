@@ -1,0 +1,15 @@
+{
+    "author": ["sleepyhauru"],
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "description": "Read-only OSRS rare impling spawn feeds backed by the RuneLite Impling Finder Oracle ORDS backend.",
+    "hidden": false,
+    "disabled": false,
+    "install_msg": "Load it with `[p]load implingfinder`. Configure a feed with `[p]implingset addchannel #dragon-imps dragon lucky`, then enable polling with `[p]implingset enable`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Post recent OSRS rare impling sightings.",
+    "end_user_data_statement": "This cog stores per-guild feed settings and recent impling spawn dedupe keys. It does not store user data.",
+    "tags": ["osrs", "runelite", "impling", "hunter", "feed"],
+    "type": "COG"
+}

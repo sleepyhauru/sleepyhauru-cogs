@@ -38,17 +38,18 @@ def install_stubs():
             pass
 
         class Embed:
-            def __init__(self, title=None, description=None, color=None, timestamp=None):
+            def __init__(self, title=None, description=None, color=None, timestamp=None, url=None):
                 self.title = title
                 self.description = description
                 self.color = color
                 self.timestamp = timestamp
+                self.url = url
                 self.fields = []
                 self.footer = None
                 self.image = None
 
-            def add_field(self, *, name, value):
-                self.fields.append(types.SimpleNamespace(name=name, value=value))
+            def add_field(self, *, name, value, inline=True):
+                self.fields.append(types.SimpleNamespace(name=name, value=value, inline=inline))
 
             def set_footer(self, *, text):
                 self.footer = text
@@ -120,6 +121,9 @@ def install_stubs():
                 self.emojis = emojis or []
                 self.emoji_limit = emoji_limit
 
+        class TextChannel:
+            pass
+
         discord.DiscordException = DiscordException
         discord.HTTPException = HTTPException
         discord.Forbidden = Forbidden
@@ -139,6 +143,7 @@ def install_stubs():
         discord.Color = Color
         discord.Interaction = Interaction
         discord.Guild = Guild
+        discord.TextChannel = TextChannel
         discord.errors = types.SimpleNamespace(Forbidden=Forbidden)
         discord.version_info = types.SimpleNamespace(major=2)
 
@@ -207,8 +212,20 @@ def install_stubs():
                 self.store = store
                 self.key = key
 
-            async def __call__(self):
+            def __call__(self):
+                return self
+
+            def __await__(self):
+                async def get_value():
+                    return self.store[self.key]
+
+                return get_value().__await__()
+
+            async def __aenter__(self):
                 return self.store[self.key]
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
 
             async def set(self, value):
                 self.store[self.key] = value
@@ -319,6 +336,7 @@ def install_stubs():
         commands.guild_only = _decorator
         commands.bot_has_permissions = _decorator
         commands.has_permissions = _decorator
+        commands.admin_or_permissions = _decorator
 
         core.Config = Config
         core.commands = commands
