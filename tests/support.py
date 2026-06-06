@@ -186,6 +186,7 @@ def install_stubs():
             def __init__(self, *args, **kwargs):
                 self.args = args
                 self.kwargs = kwargs
+                self.closed = False
 
             async def __aenter__(self):
                 return self
@@ -193,10 +194,81 @@ def install_stubs():
             async def __aexit__(self, exc_type, exc, tb):
                 return False
 
+            async def close(self):
+                self.closed = True
+
+        class Response:
+            def __init__(
+                self,
+                *,
+                text=None,
+                body=None,
+                status=200,
+                headers=None,
+                content_type=None,
+            ):
+                self.text = text
+                self.body = body
+                self.status = status
+                self.headers = headers or {}
+                self.content_type = content_type
+
+        class Router:
+            def __init__(self):
+                self.routes = []
+
+            def add_get(self, path, handler):
+                self.routes.append(types.SimpleNamespace(method="GET", path=path, handler=handler))
+
+        class Application(dict):
+            def __init__(self, *args, middlewares=None, **kwargs):
+                super().__init__()
+                self.middlewares = middlewares or []
+                self.router = Router()
+
+        class AppRunner:
+            def __init__(self, app):
+                self.app = app
+
+            async def setup(self):
+                return None
+
+            async def cleanup(self):
+                return None
+
+        class TCPSite:
+            def __init__(self, runner, host, port):
+                self.runner = runner
+                self.host = host
+                self.port = port
+
+            async def start(self):
+                return None
+
+        def json_response(data, *, status=200, headers=None):
+            import json
+
+            return Response(
+                text=json.dumps(data),
+                status=status,
+                headers=headers,
+                content_type="application/json",
+            )
+
+        web = types.ModuleType("aiohttp.web")
+        web.Application = Application
+        web.AppRunner = AppRunner
+        web.TCPSite = TCPSite
+        web.Response = Response
+        web.Request = object
+        web.json_response = json_response
+
         aiohttp.ClientError = ClientError
         aiohttp.ClientTimeout = ClientTimeout
         aiohttp.ClientSession = ClientSession
+        aiohttp.web = web
         sys.modules["aiohttp"] = aiohttp
+        sys.modules["aiohttp.web"] = web
 
     if "redbot.core" not in sys.modules:
         redbot = types.ModuleType("redbot")

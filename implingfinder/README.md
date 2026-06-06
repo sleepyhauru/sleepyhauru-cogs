@@ -107,3 +107,31 @@ For competitive hunting, set the interval to the minimum:
 Discord posts display a human-readable location resolved from bundled [Explv map labels](https://github.com/Explv/Explv.github.io/blob/master/public/resources/map_labels.json). A label in the same region and plane is preferred; otherwise the nearest label is displayed with a `Near` prefix. If no label is available, the location is shown as `Unknown area`.
 
 The chunk background uses [Explv OSRS map tiles](https://github.com/Explv/osrs_map_tiles). Matching transparent impling images are bundled from the [Old School RuneScape Wiki](https://oldschool.runescape.wiki/).
+
+## Performance Dashboard
+
+ImplingFinder automatically starts a read-only performance dashboard on
+`0.0.0.0:8765`. Put it behind a private reverse proxy and authentication layer;
+the dashboard does not implement its own authentication.
+
+The dashboard tracks backend fetches, poll processing, duplicate suppression,
+routed sightings, map download/render work, Discord posting, discovery-to-post
+latency, despawn deletion, errors, active backend backoffs, event-loop lag,
+memory use, queue health, and database size.
+
+Metrics are written through a bounded non-blocking queue so dashboard storage
+cannot delay a sighting post. Individual events are retained for 7 days and
+hourly aggregates are retained for 30 days in `metrics.sqlite3` under the cog's
+persistent Red data directory.
+
+HTTP routes are read-only:
+
+- `/` - dashboard
+- `/api/summary` - totals, latency summary, servers, and process health
+- `/api/hourly` - hourly metric series
+- `/api/events` - recent detailed events
+- `/healthz` - dashboard and metrics-store health
+
+The dashboard contains no feed controls, polling triggers, or destructive
+actions. Detailed events include server/channel names, impling type, world, and
+human-readable location, but do not expose coordinates, NPC ID, or plane.

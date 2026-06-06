@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional
 import aiohttp
 import discord
 from redbot.core import Config, commands
+from redbot.core.data_manager import cog_data_path
 
 from .core import (
     DEFAULT_ENDPOINT,
@@ -39,6 +40,8 @@ from .core import (
     sighting_key_from_legacy_dedupe_key,
 )
 from .core import ImplingSpawn
+from .dashboard import DASHBOARD_HOST, DASHBOARD_PORT, DashboardServer
+from .metrics import MetricEvent, MetricsStore
 
 
 log = logging.getLogger("red.implingfinder")
@@ -89,11 +92,37 @@ class ImplingFinder(commands.Cog):
         self._backoff_until: dict[int, float] = {}
         self._pillow_warning_logged = False
         self._map_labels = self._load_map_labels()
+        self.metrics_store: Optional[MetricsStore] = None
+        self.dashboard: Optional[DashboardServer] = None
+        self._started_at = time.time()
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
         )
+        try:
+            self.metrics_store = MetricsStore(cog_data_path(self) / "metrics.sqlite3")
+            await self.metrics_store.start()
+        except Exception:
+            self.metrics_store = None
+            log.exception("Impling Finder metrics store failed to start")
+
+        if self.metrics_store is not None:
+            try:
+                self.dashboard = DashboardServer(
+                    self.metrics_store,
+                    health_provider=self._dashboard_health,
+                    host=DASHBOARD_HOST,
+                    port=DASHBOARD_PORT,
+                )
+                await self.dashboard.start()
+            except Exception:
+                self.dashboard = None
+                log.exception(
+                    "Impling Finder dashboard failed to start on %s:%s",
+                    DASHBOARD_HOST,
+                    DASHBOARD_PORT,
+                )
         self._poll_task = asyncio.create_task(self._poll_loop(), name="implingfinder-poller")
 
     def cog_unload(self) -> None:
@@ -111,8 +140,45 @@ class ImplingFinder(commands.Cog):
         if self._poll_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
+        if self.dashboard is not None:
+            try:
+                await self.dashboard.stop()
+            except Exception:
+                log.exception("Impling Finder dashboard failed to stop cleanly")
+            self.dashboard = None
+        if self.metrics_store is not None:
+            try:
+                await self.metrics_store.stop()
+            except Exception:
+                log.exception("Impling Finder metrics store failed to stop cleanly")
+            self.metrics_store = None
         if self.session is not None and not self.session.closed:
             await self.session.close()
+
+    def _record_metric(self, event: MetricEvent) -> None:
+        if self.metrics_store is None:
+            return
+        try:
+            self.metrics_store.record(event)
+        except Exception:
+            log.exception("Impling Finder could not enqueue a metric event")
+
+    def _dashboard_health(self) -> dict[str, Any]:
+        now = time.monotonic()
+        bot_uptime = getattr(self.bot, "uptime", None)
+        if isinstance(bot_uptime, datetime):
+            if bot_uptime.tzinfo is None:
+                bot_uptime = bot_uptime.replace(tzinfo=timezone.utc)
+            uptime_seconds = (
+                datetime.now(timezone.utc) - bot_uptime.astimezone(timezone.utc)
+            ).total_seconds()
+        else:
+            uptime_seconds = time.time() - self._started_at
+        return {
+            "bot_uptime_seconds": max(0, round(uptime_seconds)),
+            "active_backoffs": sum(1 for deadline in self._backoff_until.values() if deadline > now),
+            "enabled_guilds": len(getattr(self.bot, "guilds", [])),
+        }
 
     async def _wait_until_ready(self) -> None:
         waiter = getattr(self.bot, "wait_until_red_ready", None)
@@ -172,19 +238,76 @@ class ImplingFinder(commands.Cog):
             return
 
         self._last_poll[guild.id] = now_monotonic
+        poll_started = time.monotonic()
+        fetch_started = time.monotonic()
 
         try:
             endpoint = sanitize_endpoint_url(settings.get("endpoint") or DEFAULT_ENDPOINT)
             spawns = await self._fetch_spawns(endpoint)
         except BackendError as exc:
+            fetch_ms = (time.monotonic() - fetch_started) * 1000
+            self._record_metric(
+                MetricEvent(
+                    kind="fetch",
+                    outcome="error",
+                    guild_id=str(guild.id),
+                    guild_name=str(getattr(guild, "name", guild.id)),
+                    duration_ms=fetch_ms,
+                    fetch_ms=fetch_ms,
+                    error_category=f"http_{exc.status}" if exc.status else "backend_error",
+                )
+            )
             self._record_backend_failure(guild.id, exc)
             return
         except ValueError as exc:
+            fetch_ms = (time.monotonic() - fetch_started) * 1000
+            self._record_metric(
+                MetricEvent(
+                    kind="fetch",
+                    outcome="error",
+                    guild_id=str(guild.id),
+                    guild_name=str(getattr(guild, "name", guild.id)),
+                    duration_ms=fetch_ms,
+                    fetch_ms=fetch_ms,
+                    error_category="invalid_endpoint",
+                )
+            )
             log.warning("Invalid Impling Finder endpoint for guild %s: %s", guild.id, exc)
             return
 
+        fetch_ms = (time.monotonic() - fetch_started) * 1000
+        self._record_metric(
+            MetricEvent(
+                kind="fetch",
+                guild_id=str(guild.id),
+                guild_name=str(getattr(guild, "name", guild.id)),
+                duration_ms=fetch_ms,
+                fetch_ms=fetch_ms,
+                items_count=len(spawns),
+            )
+        )
         self._record_backend_success(guild.id)
-        await self._process_polled_spawns(guild, settings, channels, spawns)
+        process_started = time.monotonic()
+        await self._process_polled_spawns(
+            guild,
+            settings,
+            channels,
+            spawns,
+            fetch_ms=fetch_ms,
+            process_started=process_started,
+        )
+        process_ms = (time.monotonic() - process_started) * 1000
+        self._record_metric(
+            MetricEvent(
+                kind="poll",
+                guild_id=str(guild.id),
+                guild_name=str(getattr(guild, "name", guild.id)),
+                duration_ms=(time.monotonic() - poll_started) * 1000,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                items_count=len(spawns),
+            )
+        )
 
     async def _process_polled_spawns(
         self,
@@ -192,6 +315,9 @@ class ImplingFinder(commands.Cog):
         settings: Mapping[str, Any],
         channels: dict[str, list[int]],
         spawns: list[ImplingSpawn],
+        *,
+        fetch_ms: Optional[float] = None,
+        process_started: Optional[float] = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         max_age = max(0, int(settings.get("max_age_seconds", DEFAULT_MAX_AGE_SECONDS)))
@@ -213,13 +339,34 @@ class ImplingFinder(commands.Cog):
 
         fresh_spawns = filter_stale_spawns(spawns, now, max_age)
         unique_spawns = collapse_duplicate_sightings(fresh_spawns)
+        duplicate_count = max(0, len(fresh_spawns) - len(unique_spawns))
         routed_spawns = [
             spawn for spawn in reversed(unique_spawns) if matching_channel_ids(channels, spawn)
         ]
+        guild_id = str(guild.id)
+        guild_name = str(getattr(guild, "name", guild.id))
+        if duplicate_count:
+            self._record_metric(
+                MetricEvent(
+                    kind="duplicate",
+                    guild_id=guild_id,
+                    guild_name=guild_name,
+                    count_value=duplicate_count,
+                )
+            )
+        if routed_spawns:
+            self._record_metric(
+                MetricEvent(
+                    kind="routed",
+                    guild_id=guild_id,
+                    guild_name=guild_name,
+                    count_value=len(routed_spawns),
+                )
+            )
         if not routed_spawns:
             return
 
-        guild_key = str(guild.id)
+        guild_key = guild_id
         async with self.config.seen() as seen:
             current_seen = list(seen.get(guild_key, []))
             to_announce, updated_seen = select_unseen_spawns(
@@ -239,12 +386,12 @@ class ImplingFinder(commands.Cog):
                         guild.id,
                     )
                     continue
-                message = await self._send_spawn_to_channel(
-                    guild,
-                    channel,
-                    spawn,
-                    screenshots=bool(settings.get("screenshots", False)),
-                )
+                send_kwargs = {"screenshots": bool(settings.get("screenshots", False))}
+                if fetch_ms is not None:
+                    send_kwargs["fetch_ms"] = fetch_ms
+                if process_started is not None:
+                    send_kwargs["process_ms"] = (time.monotonic() - process_started) * 1000
+                message = await self._send_spawn_to_channel(guild, channel, spawn, **send_kwargs)
                 await self._record_active_message(guild, spawn, channel_id, message)
 
     async def _delete_missing_active_messages(
@@ -338,6 +485,7 @@ class ImplingFinder(commands.Cog):
         channel_id: Any,
         message_id: Any,
     ) -> bool:
+        delete_started = time.monotonic()
         try:
             clean_channel_id = int(channel_id)
             clean_message_id = int(message_id)
@@ -359,6 +507,16 @@ class ImplingFinder(commands.Cog):
             else:
                 message = await channel.fetch_message(clean_message_id)
             await message.delete()
+            self._record_metric(
+                MetricEvent(
+                    kind="despawn",
+                    guild_id=str(guild.id),
+                    guild_name=str(getattr(guild, "name", guild.id)),
+                    channel_id=str(clean_channel_id),
+                    channel_name=str(getattr(channel, "name", "")) or None,
+                    duration_ms=(time.monotonic() - delete_started) * 1000,
+                )
+            )
             return True
         except discord.NotFound:
             return True
@@ -538,13 +696,28 @@ class ImplingFinder(commands.Cog):
         spawn: ImplingSpawn,
         *,
         screenshots: bool,
+        fetch_ms: Optional[float] = None,
+        process_ms: Optional[float] = None,
     ) -> Optional[discord.Message]:
+        total_started = time.monotonic()
+        render_ms: Optional[float] = None
+        send_ms: Optional[float] = None
         permissions = self._bot_permissions(guild, channel)
         if permissions is not None and not permissions.send_messages:
             log.warning(
                 "Impling Finder cannot send messages in channel %s for guild %s",
                 getattr(channel, "id", "?"),
                 guild.id,
+            )
+            self._record_post_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="permission_denied",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                error_category="send_messages",
             )
             return None
 
@@ -556,50 +729,127 @@ class ImplingFinder(commands.Cog):
                 getattr(channel, "id", "?"),
                 guild.id,
             )
-            return await channel.send(
-                self._content_for_spawn(spawn),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-
-        embed = self._embed_for_spawn(spawn)
-        file = None
-        if screenshots:
-            if can_attach:
-                file = await self._make_screenshot_file(spawn)
-                if file is not None:
-                    embed.set_image(url=f"attachment://{file.filename}")
-            else:
-                log.warning(
-                    "Impling Finder lacks Attach Files in channel %s for guild %s; skipping card",
-                    getattr(channel, "id", "?"),
-                    guild.id,
-                )
-
-        try:
+            args = (self._content_for_spawn(spawn),)
+            kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
+        else:
+            embed = self._embed_for_spawn(spawn)
+            file = None
+            if screenshots:
+                if can_attach:
+                    render_started = time.monotonic()
+                    file = await self._make_screenshot_file(spawn)
+                    render_ms = (time.monotonic() - render_started) * 1000
+                    if file is not None:
+                        embed.set_image(url=f"attachment://{file.filename}")
+                else:
+                    log.warning(
+                        "Impling Finder lacks Attach Files in channel %s for guild %s; skipping card",
+                        getattr(channel, "id", "?"),
+                        guild.id,
+                    )
+            args = ()
+            kwargs = {
+                "embed": embed,
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
             if file is not None:
-                return await channel.send(
-                    embed=embed,
-                    file=file,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            return await channel.send(
-                embed=embed,
-                allowed_mentions=discord.AllowedMentions.none(),
+                kwargs["file"] = file
+
+        send_started = time.monotonic()
+        try:
+            message = await channel.send(*args, **kwargs)
+            send_ms = (time.monotonic() - send_started) * 1000
+            self._record_post_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="ok",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=send_ms,
             )
+            return message
         except discord.Forbidden:
+            send_ms = (time.monotonic() - send_started) * 1000
             log.warning(
                 "Impling Finder was denied while sending to channel %s in guild %s",
                 getattr(channel, "id", "?"),
                 guild.id,
             )
+            self._record_post_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="permission_denied",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=send_ms,
+                error_category="discord_forbidden",
+            )
             return None
         except discord.HTTPException:
+            send_ms = (time.monotonic() - send_started) * 1000
             log.exception(
                 "Impling Finder failed to send spawn to channel %s in guild %s",
                 getattr(channel, "id", "?"),
                 guild.id,
             )
+            self._record_post_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="error",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=send_ms,
+                error_category="discord_http",
+            )
             return None
+
+    def _record_post_metric(
+        self,
+        guild: discord.Guild,
+        channel,
+        spawn: ImplingSpawn,
+        *,
+        outcome: str,
+        total_started: float,
+        fetch_ms: Optional[float],
+        process_ms: Optional[float],
+        render_ms: Optional[float] = None,
+        send_ms: Optional[float] = None,
+        error_category: Optional[str] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        self._record_metric(
+            MetricEvent(
+                kind="post",
+                outcome=outcome,
+                guild_id=str(guild.id),
+                guild_name=str(getattr(guild, "name", guild.id)),
+                channel_id=str(getattr(channel, "id", "")) or None,
+                channel_name=str(getattr(channel, "name", "")) or None,
+                impling_type=spawn.type_key,
+                world=spawn.world,
+                location=self._location_for_spawn(spawn),
+                duration_ms=(time.monotonic() - total_started) * 1000,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=send_ms,
+                end_to_end_ms=max(
+                    0.0,
+                    (now - spawn.discovered.astimezone(timezone.utc)).total_seconds() * 1000,
+                ),
+                error_category=error_category,
+            )
+        )
 
     def _bot_permissions(self, guild: discord.Guild, channel):
         member = getattr(guild, "me", None)
@@ -616,6 +866,8 @@ class ImplingFinder(commands.Cog):
         return self._make_coordinate_card_file(spawn)
 
     async def _make_map_file(self, spawn: ImplingSpawn) -> Optional[discord.File]:
+        total_started = time.monotonic()
+        fetch_ms: Optional[float] = None
         pillow = self._load_pillow()
         if pillow is None:
             return None
@@ -623,7 +875,9 @@ class ImplingFinder(commands.Cog):
 
         tile = explv_chunk_tile(spawn)
         try:
+            fetch_started = time.monotonic()
             tile_payload = await self._fetch_map_tile(tile.url)
+            fetch_ms = (time.monotonic() - fetch_started) * 1000
             image = Image.open(io.BytesIO(tile_payload)).convert("RGBA").resize(
                 (MAP_IMAGE_SIZE, MAP_IMAGE_SIZE),
                 Image.Resampling.NEAREST,
@@ -635,6 +889,18 @@ class ImplingFinder(commands.Cog):
             )
         except (MapTileError, OSError, ValueError) as exc:
             log.warning("Impling Finder could not build Explv map crop: %s", exc)
+            self._record_metric(
+                MetricEvent(
+                    kind="render",
+                    outcome="error",
+                    impling_type=spawn.type_key,
+                    world=spawn.world,
+                    location=self._location_for_spawn(spawn),
+                    duration_ms=(time.monotonic() - total_started) * 1000,
+                    fetch_ms=fetch_ms,
+                    error_category=type(exc).__name__,
+                )
+            )
             return None
 
         center_x, center_y = impling_icon_center(spawn, canvas_size=MAP_IMAGE_SIZE)
@@ -645,6 +911,18 @@ class ImplingFinder(commands.Cog):
         output = io.BytesIO()
         image.save(output, format="PNG")
         output.seek(0)
+        total_ms = (time.monotonic() - total_started) * 1000
+        self._record_metric(
+            MetricEvent(
+                kind="render",
+                impling_type=spawn.type_key,
+                world=spawn.world,
+                location=self._location_for_spawn(spawn),
+                duration_ms=total_ms,
+                fetch_ms=fetch_ms,
+                render_ms=max(0.0, total_ms - (fetch_ms or 0.0)),
+            )
+        )
         return discord.File(output, filename="impling-map.png")
 
     async def _fetch_map_tile(self, url: str) -> bytes:

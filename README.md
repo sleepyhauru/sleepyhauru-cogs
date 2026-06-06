@@ -66,7 +66,7 @@ Quick start:
 
 ### ImplingFinder (`implingfinder`)
 
-Posts recent OSRS rare impling sightings from the same read-only Oracle ORDS backend used by the RuneLite Impling Finder plugin. Supports per-guild routing by impling type, official OSRS region names, region-based dedupe/despawn cleanup, manual recent lookups, and exact-chunk Explv map images with tile-positioned impling icons.
+Posts recent OSRS rare impling sightings from the same read-only Oracle ORDS backend used by the RuneLite Impling Finder plugin. Supports per-guild routing by impling type, official OSRS region names, region-based dedupe/despawn cleanup, manual recent lookups, exact-chunk Explv map images with tile-positioned impling icons, and an embedded read-only performance dashboard.
 
 Quick start:
 - Route Dragon and Lucky implings with `[p]implingset addchannel #dragon-imps dragon lucky`.

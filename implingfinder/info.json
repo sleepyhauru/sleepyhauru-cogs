@@ -9,7 +9,7 @@
     "required_cogs": {},
     "requirements": ["pillow"],
     "short": "Post recent OSRS rare impling sightings.",
-    "end_user_data_statement": "This cog stores per-guild feed settings and recent impling spawn dedupe keys. It does not store user data.",
+    "end_user_data_statement": "This cog stores per-guild feed settings, recent impling spawn dedupe keys, and operational performance metrics including guild/channel names. Detailed metrics are retained for 7 days and hourly aggregates for 30 days. It does not store Discord user data.",
     "tags": ["osrs", "runelite", "impling", "hunter", "feed"],
     "type": "COG"
 }
