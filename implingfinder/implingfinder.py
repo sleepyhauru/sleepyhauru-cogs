@@ -58,7 +58,9 @@ MAP_CROP_SIZE = 512
 IMPLING_ICON_SIZE = 72
 MAP_RENDER_SEND_TIMEOUT_SECONDS = 2.0
 FEED_CLEANUP_HISTORY_LIMIT = 100
-DESPAWN_NOTICE_RETENTION_SECONDS = 60.0
+DESPAWN_DELETE_DELAY_SECONDS = 30.0
+DESPAWN_NOTICE_RETENTION_SECONDS = DESPAWN_DELETE_DELAY_SECONDS
+DESPAWN_DEFAULT_IMAGE_URL = "attachment://impling-map.png"
 
 
 def _display_impling_name(name: str) -> str:
@@ -107,6 +109,7 @@ class ImplingFinder(commands.Cog):
         self._started_at = time.time()
         self._startup_cleaned_guilds: set[int] = set()
         self._screenshot_edit_tasks: set[asyncio.Task] = set()
+        self._despawn_delete_tasks: set[asyncio.Task] = set()
         self._despawn_notice_until_by_channel: dict[str, dict[int, float]] = {}
 
     async def cog_load(self) -> None:
@@ -143,6 +146,8 @@ class ImplingFinder(commands.Cog):
             self._poll_task.cancel()
         for task in list(self._screenshot_edit_tasks):
             task.cancel()
+        for task in list(self._despawn_delete_tasks):
+            task.cancel()
         self._create_task(self._close_resources())
 
     def _create_task(self, coro):
@@ -157,12 +162,20 @@ class ImplingFinder(commands.Cog):
         task.add_done_callback(lambda completed: self._screenshot_edit_tasks.discard(completed))
         return task
 
+    def _create_despawn_delete_task(self, coro) -> asyncio.Task:
+        task = self._create_task(coro)
+        self._despawn_delete_tasks.add(task)
+        task.add_done_callback(lambda completed: self._despawn_delete_tasks.discard(completed))
+        return task
+
     async def _close_resources(self) -> None:
         if self._poll_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
         if self._screenshot_edit_tasks:
             await asyncio.gather(*self._screenshot_edit_tasks, return_exceptions=True)
+        if self._despawn_delete_tasks:
+            await asyncio.gather(*self._despawn_delete_tasks, return_exceptions=True)
         if self.dashboard is not None:
             try:
                 await self.dashboard.stop()
@@ -650,7 +663,6 @@ class ImplingFinder(commands.Cog):
             else:
                 message = await channel.fetch_message(clean_message_id)
             kwargs: dict[str, Any] = {
-                "attachments": [],
                 "allowed_mentions": discord.AllowedMentions.none(),
             }
             permissions = self._bot_permissions(guild, channel)
@@ -658,7 +670,11 @@ class ImplingFinder(commands.Cog):
             if spawn is not None and can_embed:
                 kwargs.update(
                     content=None,
-                    embed=self._embed_for_spawn(spawn, status="despawned"),
+                    embed=self._embed_for_spawn(
+                        spawn,
+                        status="despawned",
+                        image_url=self._existing_embed_image_url(message),
+                    ),
                 )
             else:
                 kwargs.update(
@@ -667,6 +683,9 @@ class ImplingFinder(commands.Cog):
                 )
             await message.edit(**kwargs)
             self._remember_despawn_notice(clean_channel_id, clean_message_id)
+            self._create_despawn_delete_task(
+                self._delete_despawn_notice_after(guild, clean_channel_id, clean_message_id)
+            )
             self._record_despawn_metric(
                 guild,
                 channel,
@@ -716,6 +735,41 @@ class ImplingFinder(commands.Cog):
             )
             return False
 
+    async def _delete_despawn_notice_after(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        try:
+            await asyncio.sleep(DESPAWN_DELETE_DELAY_SECONDS)
+            channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                return
+            if hasattr(channel, "get_partial_message"):
+                message = channel.get_partial_message(int(message_id))
+            else:
+                message = await channel.fetch_message(int(message_id))
+            await message.delete()
+        except asyncio.CancelledError:
+            raise
+        except discord.NotFound:
+            return
+        except discord.Forbidden:
+            log.warning(
+                "Impling Finder lacks permission to delete despawn notice %s in channel %s",
+                message_id,
+                channel_id,
+            )
+        except discord.HTTPException:
+            log.exception(
+                "Impling Finder failed to delete despawn notice %s in channel %s",
+                message_id,
+                channel_id,
+            )
+        finally:
+            self._forget_despawn_notice(channel_id, message_id)
+
     def _record_despawn_metric(
         self,
         guild: discord.Guild,
@@ -752,6 +806,19 @@ class ImplingFinder(commands.Cog):
             int(message_id)
         ] = time.monotonic() + DESPAWN_NOTICE_RETENTION_SECONDS
 
+    def _forget_despawn_notice(self, channel_id: Any, message_id: Any) -> None:
+        try:
+            channel_key = str(int(channel_id))
+            clean_message_id = int(message_id)
+        except (TypeError, ValueError):
+            return
+        message_expirations = self._despawn_notice_until_by_channel.get(channel_key)
+        if message_expirations is None:
+            return
+        message_expirations.pop(clean_message_id, None)
+        if not message_expirations:
+            self._despawn_notice_until_by_channel.pop(channel_key, None)
+
     def _despawn_notice_ids_by_channel(self) -> dict[str, set[int]]:
         now = time.monotonic()
         active_notice_ids: dict[str, set[int]] = {}
@@ -772,6 +839,16 @@ class ImplingFinder(commands.Cog):
         except (TypeError, ValueError):
             return False
         return clean_message_id in self._despawn_notice_ids_by_channel().get(channel_key, set())
+
+    def _existing_embed_image_url(self, message: Any) -> str:
+        for embed in getattr(message, "embeds", []) or []:
+            image = getattr(embed, "image", None)
+            if isinstance(image, str) and image:
+                return image
+            image_url = getattr(image, "url", None)
+            if image_url:
+                return str(image_url)
+        return DESPAWN_DEFAULT_IMAGE_URL
 
     async def _record_active_message(
         self,
@@ -1120,6 +1197,7 @@ class ImplingFinder(commands.Cog):
         spawn: ImplingSpawn,
         *,
         status: str = "spawned",
+        image_url: Optional[str] = None,
         now: Optional[datetime] = None,
     ) -> discord.Embed:
         type_key = spawn.type_key or "dragon"
@@ -1131,20 +1209,18 @@ class ImplingFinder(commands.Cog):
 
         embed = discord.Embed(
             title=f"{self._display_name_for_spawn(spawn)} {status}",
+            url=build_map_url(spawn, zoom=7),
             color=color,
         )
         embed.add_field(name="World", value=str(spawn.world), inline=True)
         embed.add_field(name="Location", value=location, inline=True)
         embed.add_field(
-            name="Coordinates",
-            value=self._coordinate_link_for_spawn(spawn),
-            inline=True,
-        )
-        embed.add_field(
             name="Discovered",
             value=f"<t:{spawn.discovered_epoch}:R>",
             inline=True,
         )
+        if image_url:
+            embed.set_image(url=image_url)
         return embed
 
     def _content_for_spawn(self, spawn: ImplingSpawn) -> str:

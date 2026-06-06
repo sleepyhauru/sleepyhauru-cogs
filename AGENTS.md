@@ -19,8 +19,9 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 - Deduplicate sightings by NPC ID, world, plane, and official OSRS region ID:
   `((x >> 6) << 8) | (y >> 6)`.
 - Edit tracked Discord messages to say the impling despawned after a successful
-  backend response no longer contains the fresh sighting. Keep messages tracked
-  when the edit fails transiently or from missing permissions.
+  backend response no longer contains the fresh sighting, retain the existing
+  screenshot in the embed, then delete the despawn notice 30 seconds later. Keep
+  messages tracked when the edit fails transiently or from missing permissions.
 - After a successful backend response, keep configured feed channels clean by
   deleting non-pinned messages that are not active live impling posts or recent
   despawn notices. This includes human messages and requires Manage Messages
@@ -29,9 +30,10 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   message IDs so configured feed channels are cleaned promptly. This startup
   scrub must not delete tracked active messages or clear active state without a
   successful backend response.
-- Discord spawn posts display World, human-readable Location, coordinate
-  hyperlink to Explv zoom 7, and relative Discovered only. Do not display NPC
-  ID, plane, a source footer, or an absolute discovered time.
+- Discord spawn posts display World, human-readable Location, and relative
+  Discovered only. The `{type} Impling spawned` embed title links to Explv zoom
+  7. Do not display NPC ID, plane, a source footer, a separate Coordinates
+  field, or an absolute discovered time.
 - Screenshot-enabled feed posts send the Discord message immediately, then edit
   that same message with the generated map attachment when rendering finishes.
   Screenshot attachments show the current `32x32` OSRS area centered on the
@@ -71,8 +73,8 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 - Map screenshots use an Explv zoom-10 crop, which corresponds to a `32x32`
   game-tile area. The matching impling asset is composited at the center of the
   final image.
-- Plain-text fallbacks include the same coordinate hyperlink. Generated-card
-  fallbacks must still avoid exposing coordinates, NPC ID, age, or plane.
+- Plain-text fallbacks include the same map URL. Generated-card fallbacks must
+  still avoid exposing coordinates, NPC ID, age, or plane.
 - Keep bundled asset names aligned with `ImplingSpawn.type_key`:
   `magpie.png`, `ninja.png`, `crystal.png`, `dragon.png`, and `lucky.png`.
 - The read-only performance dashboard starts automatically on `0.0.0.0:8765`.

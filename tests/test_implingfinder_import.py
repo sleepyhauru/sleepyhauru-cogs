@@ -325,7 +325,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cog.config.guild(guild).poll_interval(), 5)
         self.assertEqual(replies, ["Polling interval set to `5s`."])
 
-    async def test_embed_uses_spawned_title_and_coordinate_map_link(self):
+    async def test_embed_uses_spawned_title_as_map_link_without_coordinate_field(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
         spawn = module.ImplingSpawn(
@@ -342,17 +342,16 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(embed.title, "Crystal Impling spawned")
         self.assertEqual(
+            embed.url,
+            "https://explv.github.io/?centreX=3210&centreY=3420&centreZ=0&zoom=7",
+        )
+        self.assertEqual(
             [field.name for field in embed.fields],
-            ["World", "Location", "Coordinates", "Discovered"],
+            ["World", "Location", "Discovered"],
         )
         self.assertEqual(embed.fields[1].value, "Varrock")
-        self.assertEqual(
-            embed.fields[2].value,
-            "[3210, 3420](https://explv.github.io/?centreX=3210&centreY=3420&centreZ=0&zoom=7)",
-        )
-        self.assertEqual(embed.fields[3].value, "<t:1715000000:R>")
-        self.assertNotIn("<t:1715000000:F>", embed.fields[3].value)
-        self.assertIsNone(embed.url)
+        self.assertEqual(embed.fields[2].value, "<t:1715000000:R>")
+        self.assertNotIn("<t:1715000000:F>", embed.fields[2].value)
         self.assertIsNone(embed.timestamp)
         self.assertIsNone(embed.footer)
         content = cog._content_for_spawn(spawn)
@@ -362,6 +361,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_marks_tracked_message_despawned_when_spawn_disappears(self):
         module = load_module("implingfinder.implingfinder")
+        module.DESPAWN_DELETE_DELAY_SECONDS = 0
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
         recorded = []
         cog.metrics_store = types.SimpleNamespace(record=lambda event: recorded.append(event))
@@ -377,6 +377,8 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         deleted = []
 
         class PartialMessage:
+            id = 222
+
             async def edit(self, **kwargs):
                 edited.append(kwargs)
 
@@ -415,11 +417,22 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [],
         )
+        if cog._despawn_delete_tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*list(cog._despawn_delete_tasks)),
+                timeout=0.05,
+            )
 
-        self.assertEqual(deleted, [])
         self.assertEqual(len(edited), 1)
         self.assertEqual(edited[0]["embed"].title, "Crystal Impling despawned")
-        self.assertEqual(edited[0]["attachments"], [])
+        self.assertEqual(
+            edited[0]["embed"].url,
+            "https://explv.github.io/?centreX=2914&centreY=3323&centreZ=0&zoom=7",
+        )
+        self.assertEqual(edited[0]["embed"].image, "attachment://impling-map.png")
+        self.assertNotIn("Coordinates", [field.name for field in edited[0]["embed"].fields])
+        self.assertNotIn("attachments", edited[0])
+        self.assertEqual(deleted, [222])
         self.assertEqual(channel.message_id, 222)
         self.assertEqual(cog.config._global_store["active_messages"], {})
         self.assertEqual(recorded[-1].kind, "despawn")

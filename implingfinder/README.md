@@ -80,7 +80,7 @@ The backend does not provide real RuneLite screenshots. It only provides NPC ID,
 
 If `[p]implingset screenshots true` is enabled, this cog sends the sighting post immediately, then edits the same Discord message to attach a `32x32` OSRS area centered on the sighting after the map is generated. A small matching impling image is centered on the reported game tile. If the map cannot be rendered or the sighting message is already gone, the original Discord post is left in place without the attachment.
 
-Discord posts say the impling spawned, include a coordinate hyperlink to Explv at zoom 7, and use only Discord's relative timestamp for `Discovered`, such as "5 minutes ago", without showing the exact discovered time.
+Discord posts say the impling spawned, link the `{type} Impling spawned` title to Explv at zoom 7, and use only Discord's relative timestamp for `Discovered`, such as "5 minutes ago", without showing the exact discovered time.
 
 If the map tile cannot be downloaded, the cog falls back to a generated card containing only the impling name, world, and location. Neither attachment is a real in-game RuneLite screenshot. A future RuneLite companion plugin would be needed for real screenshot uploads.
 
@@ -96,9 +96,9 @@ Each sighting is deduplicated by NPC ID, world, plane, and the official OSRS reg
 
 The backend can report the same moving impling several times with slightly different coordinates or timestamps, so the cog keeps the newest row for each region and avoids posting older rows from that region as duplicates.
 
-When a tracked sighting is missing from the fresh sightings in the latest successful backend response, the cog edits the Discord message it posted for that sighting to say the impling despawned, removes the stored active message ID, and keeps the despawn notice briefly so hunters can see why it changed. Messages are kept for retry if Discord rejects the edit because of permissions or a transient API error.
+When a tracked sighting is missing from the fresh sightings in the latest successful backend response, the cog edits the Discord message it posted for that sighting to say the impling despawned, keeps the screenshot in the embed, removes the stored active message ID, and deletes the despawn notice 30 seconds later. Messages are kept for retry if Discord rejects the edit because of permissions or a transient API error.
 
-After each successful backend response, configured ImplingFinder feed channels are also cleaned so they only contain active live impling posts and brief despawn notices. The cleanup deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger feed cleanup.
+After each successful backend response, configured ImplingFinder feed channels are also cleaned so they only contain active live impling posts and recent 30-second despawn notices. The cleanup deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger feed cleanup.
 
 On cog load or reload, the cog also performs a one-time feed scrub against stored active message IDs so configured feed channels are cleaned promptly. The authoritative despawn pass still requires a successful backend response before tracked active messages are deleted or cleared.
 
