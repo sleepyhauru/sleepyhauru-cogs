@@ -58,6 +58,7 @@ MAP_CROP_SIZE = 512
 IMPLING_ICON_SIZE = 72
 MAP_RENDER_SEND_TIMEOUT_SECONDS = 2.0
 FEED_CLEANUP_HISTORY_LIMIT = 100
+FEED_CLEANUP_INTERVAL_SECONDS = 30.0
 DESPAWN_DELETE_DELAY_SECONDS = 30.0
 DESPAWN_NOTICE_RETENTION_SECONDS = DESPAWN_DELETE_DELAY_SECONDS
 DESPAWN_DEFAULT_IMAGE_URL = "attachment://impling-map.png"
@@ -110,6 +111,8 @@ class ImplingFinder(commands.Cog):
         self._startup_cleaned_guilds: set[int] = set()
         self._screenshot_edit_tasks: set[asyncio.Task] = set()
         self._despawn_delete_tasks: set[asyncio.Task] = set()
+        self._post_poll_tasks: set[asyncio.Task] = set()
+        self._last_feed_cleanup: dict[int, float] = {}
         self._despawn_notice_until_by_channel: dict[str, dict[int, float]] = {}
 
     async def cog_load(self) -> None:
@@ -148,6 +151,8 @@ class ImplingFinder(commands.Cog):
             task.cancel()
         for task in list(self._despawn_delete_tasks):
             task.cancel()
+        for task in list(self._post_poll_tasks):
+            task.cancel()
         self._create_task(self._close_resources())
 
     def _create_task(self, coro):
@@ -168,6 +173,12 @@ class ImplingFinder(commands.Cog):
         task.add_done_callback(lambda completed: self._despawn_delete_tasks.discard(completed))
         return task
 
+    def _create_post_poll_task(self, coro) -> asyncio.Task:
+        task = self._create_task(coro)
+        self._post_poll_tasks.add(task)
+        task.add_done_callback(lambda completed: self._post_poll_tasks.discard(completed))
+        return task
+
     async def _close_resources(self) -> None:
         if self._poll_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
@@ -176,6 +187,8 @@ class ImplingFinder(commands.Cog):
             await asyncio.gather(*self._screenshot_edit_tasks, return_exceptions=True)
         if self._despawn_delete_tasks:
             await asyncio.gather(*self._despawn_delete_tasks, return_exceptions=True)
+        if self._post_poll_tasks:
+            await asyncio.gather(*self._post_poll_tasks, return_exceptions=True)
         if self.dashboard is not None:
             try:
                 await self.dashboard.stop()
@@ -243,13 +256,20 @@ class ImplingFinder(commands.Cog):
 
     async def _poll_enabled_guilds(self) -> None:
         now_monotonic = time.monotonic()
-        for guild in list(getattr(self.bot, "guilds", [])):
-            try:
-                await self._poll_guild(guild, now_monotonic)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("Impling Finder failed while polling guild %s", getattr(guild, "id", "?"))
+        await asyncio.gather(
+            *(
+                self._poll_guild_safely(guild, now_monotonic)
+                for guild in list(getattr(self.bot, "guilds", []))
+            )
+        )
+
+    async def _poll_guild_safely(self, guild: discord.Guild, now_monotonic: float) -> None:
+        try:
+            await self._poll_guild(guild, now_monotonic)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Impling Finder failed while polling guild %s", getattr(guild, "id", "?"))
 
     async def _poll_guild(self, guild: discord.Guild, now_monotonic: float) -> None:
         if await self._cog_disabled_in_guild(guild):
@@ -314,6 +334,7 @@ class ImplingFinder(commands.Cog):
             return
 
         fetch_ms = (time.monotonic() - fetch_started) * 1000
+        fetch_completed_at = datetime.now(timezone.utc)
         self._record_metric(
             MetricEvent(
                 kind="fetch",
@@ -332,6 +353,7 @@ class ImplingFinder(commands.Cog):
             channels,
             spawns,
             fetch_ms=fetch_ms,
+            fetch_completed_at=fetch_completed_at,
             process_started=process_started,
         )
         process_ms = (time.monotonic() - process_started) * 1000
@@ -355,6 +377,7 @@ class ImplingFinder(commands.Cog):
         spawns: list[ImplingSpawn],
         *,
         fetch_ms: Optional[float] = None,
+        fetch_completed_at: Optional[datetime] = None,
         process_started: Optional[float] = None,
     ) -> None:
         now = datetime.now(timezone.utc)
@@ -368,12 +391,6 @@ class ImplingFinder(commands.Cog):
         for spawn in fresh_spawns:
             current_sighting_aliases.setdefault(spawn.dedupe_key, spawn.sighting_key)
             current_sighting_aliases.setdefault(spawn.legacy_area_key, spawn.sighting_key)
-        await self._delete_missing_active_messages(
-            guild,
-            current_sighting_keys,
-            current_sighting_aliases,
-            current_spawns_by_key,
-        )
         await self._clear_missing_seen_sightings(
             guild,
             current_sighting_keys,
@@ -417,6 +434,7 @@ class ImplingFinder(commands.Cog):
                 )
                 seen[guild_key] = updated_seen
 
+            send_tasks = []
             for spawn in to_announce:
                 for channel_id in matching_channel_ids(channels, spawn):
                     channel = guild.get_channel(channel_id)
@@ -427,19 +445,109 @@ class ImplingFinder(commands.Cog):
                             guild.id,
                         )
                         continue
-                    send_kwargs = {"screenshots": bool(settings.get("screenshots", False))}
-                    if fetch_ms is not None:
-                        send_kwargs["fetch_ms"] = fetch_ms
-                    if process_started is not None:
-                        send_kwargs["process_ms"] = (time.monotonic() - process_started) * 1000
-                    message = await self._send_spawn_to_channel(
-                        guild,
-                        channel,
-                        spawn,
-                        **send_kwargs,
+                    send_tasks.append(
+                        self._send_spawn_job(
+                            guild,
+                            channel,
+                            spawn,
+                            channel_id,
+                            screenshots=bool(settings.get("screenshots", False)),
+                            fetch_ms=fetch_ms,
+                            fetch_completed_at=fetch_completed_at,
+                            process_started=process_started,
+                        )
                     )
+            if send_tasks:
+                send_results = await asyncio.gather(*send_tasks)
+                for spawn, channel_id, message in send_results:
                     await self._record_active_message(guild, spawn, channel_id, message)
 
+        self._schedule_post_poll_maintenance(
+            guild,
+            channels,
+            current_sighting_keys,
+            current_sighting_aliases,
+            current_spawns_by_key,
+        )
+
+    async def _send_spawn_job(
+        self,
+        guild: discord.Guild,
+        channel,
+        spawn: ImplingSpawn,
+        channel_id: int,
+        *,
+        screenshots: bool,
+        fetch_ms: Optional[float],
+        fetch_completed_at: Optional[datetime],
+        process_started: Optional[float],
+    ) -> tuple[ImplingSpawn, int, Optional[discord.Message]]:
+        send_kwargs: dict[str, Any] = {"screenshots": screenshots}
+        if fetch_ms is not None:
+            send_kwargs["fetch_ms"] = fetch_ms
+        if fetch_completed_at is not None:
+            send_kwargs["fetch_completed_at"] = fetch_completed_at
+        if process_started is not None:
+            send_kwargs["process_ms"] = (time.monotonic() - process_started) * 1000
+        message = await self._send_spawn_to_channel(
+            guild,
+            channel,
+            spawn,
+            **send_kwargs,
+        )
+        return spawn, channel_id, message
+
+    def _schedule_post_poll_maintenance(
+        self,
+        guild: discord.Guild,
+        channels: dict[str, list[int]],
+        current_sighting_keys: set[str],
+        current_sighting_aliases: Mapping[str, str],
+        current_spawns_by_key: Mapping[str, ImplingSpawn],
+    ) -> None:
+        self._create_post_poll_task(
+            self._run_post_poll_maintenance(
+                guild,
+                dict(channels),
+                set(current_sighting_keys),
+                dict(current_sighting_aliases),
+                dict(current_spawns_by_key),
+            )
+        )
+
+    async def _run_post_poll_maintenance(
+        self,
+        guild: discord.Guild,
+        channels: dict[str, list[int]],
+        current_sighting_keys: set[str],
+        current_sighting_aliases: Mapping[str, str],
+        current_spawns_by_key: Mapping[str, ImplingSpawn],
+    ) -> None:
+        try:
+            await self._delete_missing_active_messages(
+                guild,
+                current_sighting_keys,
+                current_sighting_aliases,
+                current_spawns_by_key,
+            )
+            await self._clean_feed_channels_if_due(guild, channels)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception(
+                "Impling Finder failed during post-poll maintenance for guild %s",
+                getattr(guild, "id", "?"),
+            )
+
+    async def _clean_feed_channels_if_due(
+        self,
+        guild: discord.Guild,
+        channels: Mapping[str, list[int]],
+    ) -> None:
+        now = time.monotonic()
+        if now - self._last_feed_cleanup.get(guild.id, 0) < FEED_CLEANUP_INTERVAL_SECONDS:
+            return
+        self._last_feed_cleanup[guild.id] = now
         await self._clean_feed_channels(guild, channels)
 
     async def _delete_missing_active_messages(
@@ -1249,6 +1357,7 @@ class ImplingFinder(commands.Cog):
         *,
         screenshots: bool,
         fetch_ms: Optional[float] = None,
+        fetch_completed_at: Optional[datetime] = None,
         process_ms: Optional[float] = None,
     ) -> Optional[discord.Message]:
         total_started = time.monotonic()
@@ -1268,6 +1377,7 @@ class ImplingFinder(commands.Cog):
                 outcome="permission_denied",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 error_category="send_messages",
             )
@@ -1312,6 +1422,7 @@ class ImplingFinder(commands.Cog):
                 outcome="ok",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=send_ms,
@@ -1324,6 +1435,7 @@ class ImplingFinder(commands.Cog):
                         message,
                         spawn,
                         fetch_ms=fetch_ms,
+                        fetch_completed_at=fetch_completed_at,
                         process_ms=process_ms,
                     )
                 )
@@ -1342,6 +1454,7 @@ class ImplingFinder(commands.Cog):
                 outcome="permission_denied",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=send_ms,
@@ -1362,6 +1475,7 @@ class ImplingFinder(commands.Cog):
                 outcome="error",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=send_ms,
@@ -1376,8 +1490,9 @@ class ImplingFinder(commands.Cog):
         message: discord.Message,
         spawn: ImplingSpawn,
         *,
-        fetch_ms: Optional[float],
-        process_ms: Optional[float],
+        fetch_ms: Optional[float] = None,
+        fetch_completed_at: Optional[datetime] = None,
+        process_ms: Optional[float] = None,
     ) -> None:
         total_started = time.monotonic()
         render_ms: Optional[float] = None
@@ -1394,6 +1509,7 @@ class ImplingFinder(commands.Cog):
                     outcome="skipped",
                     total_started=total_started,
                     fetch_ms=fetch_ms,
+                    fetch_completed_at=fetch_completed_at,
                     process_ms=process_ms,
                     render_ms=render_ms,
                     send_ms=edit_ms,
@@ -1412,6 +1528,7 @@ class ImplingFinder(commands.Cog):
                     outcome="error",
                     total_started=total_started,
                     fetch_ms=fetch_ms,
+                    fetch_completed_at=fetch_completed_at,
                     process_ms=process_ms,
                     render_ms=render_ms,
                     send_ms=edit_ms,
@@ -1430,6 +1547,7 @@ class ImplingFinder(commands.Cog):
                     outcome="skipped",
                     total_started=total_started,
                     fetch_ms=fetch_ms,
+                    fetch_completed_at=fetch_completed_at,
                     process_ms=process_ms,
                     render_ms=render_ms,
                     send_ms=edit_ms,
@@ -1453,6 +1571,7 @@ class ImplingFinder(commands.Cog):
                 outcome="ok",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=edit_ms,
@@ -1472,6 +1591,7 @@ class ImplingFinder(commands.Cog):
                 outcome="skipped",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=edit_ms,
@@ -1490,6 +1610,7 @@ class ImplingFinder(commands.Cog):
                 outcome="permission_denied",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=edit_ms,
@@ -1508,6 +1629,7 @@ class ImplingFinder(commands.Cog):
                 outcome="error",
                 total_started=total_started,
                 fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=edit_ms,
@@ -1523,6 +1645,7 @@ class ImplingFinder(commands.Cog):
         outcome: str,
         total_started: float,
         fetch_ms: Optional[float],
+        fetch_completed_at: Optional[datetime],
         process_ms: Optional[float],
         render_ms: Optional[float] = None,
         send_ms: Optional[float] = None,
@@ -1542,6 +1665,7 @@ class ImplingFinder(commands.Cog):
                 location=self._location_for_spawn(spawn),
                 duration_ms=(time.monotonic() - total_started) * 1000,
                 fetch_ms=fetch_ms,
+                age_at_fetch_ms=self._age_at_fetch_ms(spawn, fetch_completed_at),
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=send_ms,
@@ -1562,6 +1686,7 @@ class ImplingFinder(commands.Cog):
         outcome: str,
         total_started: float,
         fetch_ms: Optional[float],
+        fetch_completed_at: Optional[datetime],
         process_ms: Optional[float],
         render_ms: Optional[float],
         send_ms: Optional[float],
@@ -1581,6 +1706,7 @@ class ImplingFinder(commands.Cog):
                 location=self._location_for_spawn(spawn),
                 duration_ms=(time.monotonic() - total_started) * 1000,
                 fetch_ms=fetch_ms,
+                age_at_fetch_ms=self._age_at_fetch_ms(spawn, fetch_completed_at),
                 process_ms=process_ms,
                 render_ms=render_ms,
                 send_ms=send_ms,
@@ -1590,6 +1716,24 @@ class ImplingFinder(commands.Cog):
                 ),
                 error_category=error_category,
             )
+        )
+
+    def _age_at_fetch_ms(
+        self,
+        spawn: ImplingSpawn,
+        fetch_completed_at: Optional[datetime],
+    ) -> Optional[float]:
+        if fetch_completed_at is None:
+            return None
+        if fetch_completed_at.tzinfo is None:
+            fetch_completed_at = fetch_completed_at.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (
+                fetch_completed_at.astimezone(timezone.utc)
+                - spawn.discovered.astimezone(timezone.utc)
+            ).total_seconds()
+            * 1000,
         )
 
     def _bot_permissions(self, guild: discord.Guild, channel):

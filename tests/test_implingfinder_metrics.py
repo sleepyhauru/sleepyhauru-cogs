@@ -43,6 +43,7 @@ class ImplingFinderMetricsTest(unittest.IsolatedAsyncioTestCase):
                     render_ms=70,
                     send_ms=50,
                     end_to_end_ms=4_200,
+                    age_at_fetch_ms=3_000,
                 )
             )
             store.record(
@@ -86,10 +87,12 @@ class ImplingFinderMetricsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary["totals"]["errors"], 1)
             self.assertEqual(summary["latency_ms"]["fetch"]["average"], 500.0)
             self.assertEqual(summary["latency_ms"]["send"]["average"], 50.0)
+            self.assertEqual(summary["latency_ms"]["age_at_fetch"]["average"], 3_000.0)
             self.assertEqual(events[0]["error_category"], "timeout")
             self.assertEqual(events[1]["kind"], "attachment")
             self.assertEqual(events[1]["channel_name"], "dragon-imps")
             self.assertEqual(events[1]["location"], "Crafting Guild")
+            self.assertEqual(events[2]["age_at_fetch_ms"], 3_000.0)
             self.assertEqual(len(hourly), 3)
             self.assertEqual(servers, [{"id": "123", "name": "Impling Hunters"}])
 

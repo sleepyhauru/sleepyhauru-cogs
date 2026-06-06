@@ -98,7 +98,7 @@ The backend can report the same moving impling several times with slightly diffe
 
 When a tracked sighting is missing from the fresh sightings in the latest successful backend response, the cog edits the Discord message it posted for that sighting to say the impling despawned, keeps the screenshot in the embed, removes the stored active message ID, and deletes the despawn notice 30 seconds later. Messages are kept for retry if Discord rejects the edit because of permissions or a transient API error.
 
-After each successful backend response, configured ImplingFinder feed channels are also cleaned so they only contain active live impling posts and recent 30-second despawn notices. The cleanup deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger feed cleanup.
+After each successful backend response, new live sightings are posted before despawn and cleanup maintenance. Matching channel sends run concurrently, then post-poll maintenance marks despawns and runs feed cleanup in the background. Recurring feed cleanup is throttled to every 30 seconds per guild and deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger despawn or feed cleanup.
 
 On cog load or reload, the cog also performs a one-time feed scrub against stored active message IDs so configured feed channels are cleaned promptly. The authoritative despawn pass still requires a successful backend response before tracked active messages are deleted or cleared.
 
@@ -122,7 +122,7 @@ the dashboard does not implement its own authentication.
 
 The dashboard tracks backend fetches, poll processing, duplicate suppression,
 routed sightings, map download/render work, Discord posting, screenshot attachment
-edits, discovery-to-post latency, despawn edits, feed cleanup, errors, active backend backoffs, event-loop lag,
+edits, age-at-fetch latency, discovery-to-post latency, despawn edits, feed cleanup, errors, active backend backoffs, event-loop lag,
 memory use, queue health, and database size.
 
 Metrics are written through a bounded non-blocking queue so dashboard storage

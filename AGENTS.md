@@ -38,6 +38,9 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   that same message with the generated map attachment when rendering finishes.
   Screenshot attachments show the current `32x32` OSRS area centered on the
   sighting and place a matching impling icon centered on the reported game tile.
+- New live sighting posts are sent before post-poll despawn/cleanup maintenance.
+  Matching channel sends run concurrently; post-poll maintenance runs in the
+  background and feed cleanup is throttled to avoid extending the poll cycle.
 - Preserve migration support for previously stored exact dedupe keys and coarse
   area keys when changing sighting-state behavior.
 
@@ -70,6 +73,7 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   outside configured ImplingFinder feed channels. The only exception is the
   one-time startup scrub, which may clean non-pinned messages that are not
   stored as active message IDs.
+- Recurring feed-channel cleanup is throttled to every 30 seconds per guild.
 - Map screenshots use an Explv zoom-10 crop, which corresponds to a `32x32`
   game-tile area. The matching impling asset is composited at the center of the
   final image.
@@ -81,6 +85,7 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   It is protected by the external Traefik/VoidAuth layer, not by cog routes.
 - Metrics producers must use the bounded non-blocking queue. Never await a
   metrics write from fetch, processing, rendering, despawn, or posting paths.
+  Post metrics must include age-at-fetch and discovery-to-post latency.
   Screenshot attachment edit metrics must include guild, channel, impling type,
   world, human-readable location, render timing, edit timing, and end-to-end
   latency.

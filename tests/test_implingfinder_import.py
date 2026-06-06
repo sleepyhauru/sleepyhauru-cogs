@@ -160,13 +160,14 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             name="dragon-imps",
             send=self._async_return(types.SimpleNamespace(id=999)),
         )
+        discovered = datetime.fromtimestamp(1_715_000_000, timezone.utc)
         spawn = module.ImplingSpawn(
             npcid=1644,
             world=489,
             xcoord=2914,
             ycoord=3323,
             plane=0,
-            discovered=datetime.now(timezone.utc),
+            discovered=discovered,
         )
         cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
             send_messages=True,
@@ -182,6 +183,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             screenshots=False,
             fetch_ms=80,
             process_ms=20,
+            fetch_completed_at=datetime.fromtimestamp(1_715_000_003, timezone.utc),
         )
 
         event = recorded[-1]
@@ -193,6 +195,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.location, "Crafting Guild")
         self.assertEqual(event.fetch_ms, 80)
         self.assertEqual(event.process_ms, 20)
+        self.assertEqual(event.age_at_fetch_ms, 3_000)
         self.assertIsNotNone(event.send_ms)
         self.assertIsNotNone(event.end_to_end_ms)
 
@@ -309,6 +312,18 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             "discovered_epoch": spawn.discovered_epoch,
         }
 
+    async def _cancel_post_poll_tasks(self, cog):
+        tasks = list(getattr(cog, "_post_poll_tasks", set()))
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _wait_post_poll_tasks(self, cog):
+        tasks = list(getattr(cog, "_post_poll_tasks", set()))
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=0.25)
+
     async def test_interval_command_accepts_five_second_minimum(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -417,6 +432,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [],
         )
+        await self._wait_post_poll_tasks(cog)
         if cog._despawn_delete_tasks:
             await asyncio.wait_for(
                 asyncio.gather(*list(cog._despawn_delete_tasks)),
@@ -484,10 +500,106 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [old_spawn],
         )
+        await self._wait_post_poll_tasks(cog)
 
         self.assertEqual(len(edited), 1)
         self.assertEqual(edited[0]["embed"].title, "Dragon Impling despawned")
         self.assertEqual(cog.config._global_store["active_messages"], {})
+
+    async def test_process_posts_before_background_despawn_and_cleanup(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda channel_id: object())
+        sent = []
+        maintenance_started = asyncio.Event()
+        release_maintenance = asyncio.Event()
+
+        async def send_spawn(_guild, _channel, received_spawn, *, screenshots, **_kwargs):
+            sent.append(received_spawn)
+            return types.SimpleNamespace(id=333)
+
+        async def blocked_maintenance(*_args, **_kwargs):
+            maintenance_started.set()
+            await release_maintenance.wait()
+
+        cog._send_spawn_to_channel = send_spawn
+        cog._delete_missing_active_messages = blocked_maintenance
+        cog._clean_feed_channels = blocked_maintenance
+
+        try:
+            await asyncio.wait_for(
+                cog._process_polled_spawns(
+                    guild,
+                    {"max_age_seconds": 900, "announce_existing": True, "screenshots": False},
+                    {"111": [1644]},
+                    [spawn],
+                ),
+                timeout=0.05,
+            )
+            await asyncio.sleep(0)
+            self.assertEqual(sent, [spawn])
+            self.assertTrue(maintenance_started.is_set())
+        finally:
+            release_maintenance.set()
+            await self._cancel_post_poll_tasks(cog)
+
+    async def test_process_sends_matching_channels_in_parallel(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        channels = {111: object(), 222: object()}
+        guild = types.SimpleNamespace(
+            id=123,
+            name="Impling Hunters",
+            get_channel=lambda channel_id: channels.get(channel_id),
+        )
+        started = 0
+        max_in_flight = 0
+        in_flight = 0
+        release_sends = asyncio.Event()
+
+        async def send_spawn(_guild, _channel, _spawn, *, screenshots, **_kwargs):
+            nonlocal started, in_flight, max_in_flight
+            started += 1
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            if started == 2:
+                release_sends.set()
+            await release_sends.wait()
+            in_flight -= 1
+            return types.SimpleNamespace(id=400 + started)
+
+        cog._send_spawn_to_channel = send_spawn
+        cog._delete_missing_active_messages = self._async_return(None)
+        cog._clean_feed_channels = self._async_return(None)
+
+        await asyncio.wait_for(
+            cog._process_polled_spawns(
+                guild,
+                {"max_age_seconds": 900, "announce_existing": True, "screenshots": False},
+                {"111": [1644], "222": [1644]},
+                [spawn],
+            ),
+            timeout=0.05,
+        )
+
+        self.assertEqual(started, 2)
+        self.assertEqual(max_in_flight, 2)
 
     async def test_process_cleans_feed_channel_when_no_live_spawns(self):
         module = load_module("implingfinder.implingfinder")
@@ -524,6 +636,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [],
         )
+        await self._wait_post_poll_tasks(cog)
 
         self.assertEqual(deleted, [10])
         self.assertEqual(channel.history_limit, module.FEED_CLEANUP_HISTORY_LIMIT)
@@ -612,6 +725,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [spawn],
         )
+        await self._wait_post_poll_tasks(cog)
 
         self.assertEqual(deleted, [333])
         self.assertEqual(channel.history_limit, module.FEED_CLEANUP_HISTORY_LIMIT)
@@ -832,6 +946,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [spawn],
         )
+        await self._wait_post_poll_tasks(cog)
 
         self.assertEqual(deleted, [])
         self.assertEqual(
@@ -861,6 +976,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             {"111": [1644]},
             [spawn],
         )
+        await self._wait_post_poll_tasks(cog)
 
         self.assertEqual(
             cog.config._global_store["active_messages"],

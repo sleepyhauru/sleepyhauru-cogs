@@ -20,9 +20,18 @@ DEFAULT_QUEUE_SIZE = 2048
 MAX_BATCH_SIZE = 100
 MAINTENANCE_INTERVAL_SECONDS = 60 * 60
 HEARTBEAT_INTERVAL_SECONDS = 5
-LATENCY_FIELDS = ("duration_ms", "fetch_ms", "process_ms", "render_ms", "send_ms", "end_to_end_ms")
+LATENCY_FIELDS = (
+    "duration_ms",
+    "fetch_ms",
+    "age_at_fetch_ms",
+    "process_ms",
+    "render_ms",
+    "send_ms",
+    "end_to_end_ms",
+)
 LATENCY_KINDS = {
     "fetch_ms": "fetch",
+    "age_at_fetch_ms": "post",
     "process_ms": "poll",
     "render_ms": "render",
     "send_ms": "post",
@@ -44,6 +53,7 @@ class MetricEvent:
     location: Optional[str] = None
     duration_ms: Optional[float] = None
     fetch_ms: Optional[float] = None
+    age_at_fetch_ms: Optional[float] = None
     process_ms: Optional[float] = None
     render_ms: Optional[float] = None
     send_ms: Optional[float] = None
@@ -400,8 +410,28 @@ class MetricsStore:
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(events)").fetchall()
         }
-        if "items_count" not in event_columns:
-            connection.execute("ALTER TABLE events ADD COLUMN items_count INTEGER")
+        event_additions = {
+            "items_count": "items_count INTEGER",
+            "age_at_fetch_ms": "age_at_fetch_ms REAL",
+        }
+        for column_name, column_sql in event_additions.items():
+            if column_name not in event_columns:
+                connection.execute(f"ALTER TABLE events ADD COLUMN {column_sql}")
+
+        hourly_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(hourly_metrics)").fetchall()
+        }
+        for field_name in LATENCY_FIELDS:
+            additions = {
+                f"{field_name}_sum": f"{field_name}_sum REAL NOT NULL DEFAULT 0",
+                f"{field_name}_count": f"{field_name}_count INTEGER NOT NULL DEFAULT 0",
+                f"{field_name}_min": f"{field_name}_min REAL",
+                f"{field_name}_max": f"{field_name}_max REAL",
+            }
+            for column_name, column_sql in additions.items():
+                if column_name not in hourly_columns:
+                    connection.execute(f"ALTER TABLE hourly_metrics ADD COLUMN {column_sql}")
 
 
 def _event_values(event: MetricEvent) -> dict[str, Any]:
@@ -492,13 +522,13 @@ def _current_rss_bytes() -> int:
 
 _EVENT_COLUMNS = (
     "occurred_at, kind, outcome, guild_id, guild_name, channel_id, channel_name, "
-    "impling_type, world, location, duration_ms, fetch_ms, process_ms, render_ms, "
+    "impling_type, world, location, duration_ms, fetch_ms, age_at_fetch_ms, process_ms, render_ms, "
     "send_ms, end_to_end_ms, items_count, count_value, error_category"
 )
 _INSERT_EVENT = (
     f"INSERT INTO events ({_EVENT_COLUMNS}) VALUES ("
     ":occurred_at, :kind, :outcome, :guild_id, :guild_name, :channel_id, :channel_name, "
-    ":impling_type, :world, :location, :duration_ms, :fetch_ms, :process_ms, :render_ms, "
+    ":impling_type, :world, :location, :duration_ms, :fetch_ms, :age_at_fetch_ms, :process_ms, :render_ms, "
     ":send_ms, :end_to_end_ms, :items_count, :count_value, :error_category)"
 )
 
@@ -564,6 +594,7 @@ CREATE TABLE IF NOT EXISTS events (
     location TEXT NOT NULL DEFAULT '',
     duration_ms REAL,
     fetch_ms REAL,
+    age_at_fetch_ms REAL,
     process_ms REAL,
     render_ms REAL,
     send_ms REAL,

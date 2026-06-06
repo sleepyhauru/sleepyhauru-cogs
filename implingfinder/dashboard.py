@@ -355,7 +355,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="panel-head"><h2>Recent events</h2><span id="event-count" class="muted"></span></div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Time</th><th>Event</th><th>Outcome</th><th>Server</th><th>Channel</th><th>Impling</th><th>World</th><th>Location</th><th>Duration</th><th>End-to-end</th></tr></thead>
+        <thead><tr><th>Time</th><th>Event</th><th>Outcome</th><th>Server</th><th>Channel</th><th>Impling</th><th>World</th><th>Location</th><th>Duration</th><th>Age at fetch</th><th>End-to-end</th></tr></thead>
         <tbody id="events"></tbody>
       </table>
     </div>
@@ -393,6 +393,7 @@ function renderSummary(data) {
     metric("Fetches", count(totals.fetches), `${count(totals.errors)} errors`),
     metric("Posts sent", count(totals.posts), `${count(totals.routed)} routed`),
     metric("Fetch average", ms(latency.fetch?.average), `max ${ms(latency.fetch?.maximum)}`),
+    metric("Age at fetch", ms(latency.age_at_fetch?.average), `max ${ms(latency.age_at_fetch?.maximum)}`),
     metric("Render average", ms(latency.render?.average), `max ${ms(latency.render?.maximum)}`),
     metric("Discord send", ms(latency.send?.average), `max ${ms(latency.send?.maximum)}`),
     metric("Discovery to post", ms(latency.end_to_end?.average), `max ${ms(latency.end_to_end?.maximum)}`)
@@ -427,15 +428,15 @@ function renderEvents(data) {
     <td><span class="tag">${esc(event.kind)}</span></td>
     <td class="${event.outcome === "ok" ? "ok" : "error-text"}">${esc(event.outcome)}</td>
     <td>${esc(event.guild_name)}</td><td>${esc(event.channel_name)}</td><td>${esc(event.impling_type)}</td>
-    <td>${esc(event.world)}</td><td>${esc(event.location)}</td><td>${esc(ms(event.duration_ms))}</td><td>${esc(ms(event.end_to_end_ms))}</td>
-  </tr>`).join("") || `<tr><td colspan="10" class="muted">No events in this range.</td></tr>`;
+    <td>${esc(event.world)}</td><td>${esc(event.location)}</td><td>${esc(ms(event.duration_ms))}</td><td>${esc(ms(event.age_at_fetch_ms))}</td><td>${esc(ms(event.end_to_end_ms))}</td>
+  </tr>`).join("") || `<tr><td colspan="11" class="muted">No events in this range.</td></tr>`;
 }
 function renderChart(rows) {
   const canvas = $("latency-chart"), ctx = canvas.getContext("2d");
   const width = canvas.width, height = canvas.height, pad = 38;
   ctx.clearRect(0, 0, width, height); ctx.fillStyle = "#191c1f"; ctx.fillRect(0, 0, width, height);
-  const fields = [["fetch","#69c5d4"],["process","#7fa9ec"],["render","#b898dc"],["send","#64d49a"]];
-  const kinds = {fetch:"fetch", process:"poll", render:"render", send:"post"};
+  const fields = [["fetch","#69c5d4"],["age_at_fetch","#f1c36d"],["process","#7fa9ec"],["render","#b898dc"],["send","#64d49a"]];
+  const kinds = {fetch:"fetch", age_at_fetch:"post", process:"poll", render:"render", send:"post"};
   const points = fields.map(([field,color]) => [field,color,rows.filter(r => r.kind === kinds[field] && r.latency_ms?.[field]?.average != null).map(r => [new Date(r.hour).getTime(), r.latency_ms[field].average])]);
   const all = points.flatMap(p => p[2]); if (!all.length) { ctx.fillStyle="#9da5ad"; ctx.fillText("No latency samples", pad, height/2); return; }
   const minX = Math.min(...all.map(p=>p[0])); let maxX = Math.max(...all.map(p=>p[0])); if (maxX === minX) maxX = minX + 3600000; const maxY = Math.max(...all.map(p=>p[1]), 10);
