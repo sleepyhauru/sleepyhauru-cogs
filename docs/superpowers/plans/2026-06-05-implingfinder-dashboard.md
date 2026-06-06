@@ -65,8 +65,8 @@
 - Modify on Unraid: `/boot/config/plugins/compose.manager/projects/hauru-private/dynamic.yml`
 - Deploy to Red: `/mnt/user/appdata/redbot/cogs/CogManager/cogs/implingfinder/`
 
-- [ ] Commit repository changes and push `main`.
-- [ ] Copy the updated ImplingFinder cog into Red's persistent cog directory and restart Red.
-- [ ] Verify the dashboard listens through host port `8765` and `/healthz` responds.
-- [ ] Back up and update Traefik `dynamic.yml` with an `implings.hauru.app` router using `voidauth-forward` and a service targeting `http://100.70.109.15:8765`.
-- [ ] Validate/reload Traefik and verify routed access requires VoidAuth and serves the dashboard.
+- [x] Commit repository changes and push `main`.
+- [x] Copy the updated ImplingFinder cog into Red's persistent cog directory and restart Red.
+- [x] Verify the dashboard listens through host port `8765` and `/healthz` responds.
+- [x] Back up and update Traefik `dynamic.yml` with an `implings.hauru.app` router using `voidauth-forward` and a service targeting `http://100.70.109.15:8765`.
+- [x] Validate/reload Traefik and verify routed access requires VoidAuth and serves the dashboard.
