@@ -47,6 +47,23 @@ class ImplingFinderMetricsTest(unittest.IsolatedAsyncioTestCase):
             )
             store.record(
                 MetricEvent(
+                    kind="attachment",
+                    occurred_at=now,
+                    guild_id="123",
+                    guild_name="Impling Hunters",
+                    channel_id="456",
+                    channel_name="dragon-imps",
+                    impling_type="dragon",
+                    world=489,
+                    location="Crafting Guild",
+                    duration_ms=180,
+                    render_ms=150,
+                    send_ms=30,
+                    end_to_end_ms=4_500,
+                )
+            )
+            store.record(
+                MetricEvent(
                     kind="fetch",
                     outcome="error",
                     occurred_at=now,
@@ -65,12 +82,15 @@ class ImplingFinderMetricsTest(unittest.IsolatedAsyncioTestCase):
             servers = await store.servers()
 
             self.assertEqual(summary["totals"]["posts"], 1)
+            self.assertEqual(summary["totals"]["attachments"], 1)
             self.assertEqual(summary["totals"]["errors"], 1)
             self.assertEqual(summary["latency_ms"]["fetch"]["average"], 500.0)
             self.assertEqual(summary["latency_ms"]["send"]["average"], 50.0)
             self.assertEqual(events[0]["error_category"], "timeout")
+            self.assertEqual(events[1]["kind"], "attachment")
+            self.assertEqual(events[1]["channel_name"], "dragon-imps")
             self.assertEqual(events[1]["location"], "Crafting Guild")
-            self.assertEqual(len(hourly), 2)
+            self.assertEqual(len(hourly), 3)
             self.assertEqual(servers, [{"id": "123", "name": "Impling Hunters"}])
 
     async def test_retention_keeps_seven_day_events_and_thirty_day_aggregates(self):

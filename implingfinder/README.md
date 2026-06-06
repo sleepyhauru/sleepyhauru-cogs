@@ -78,7 +78,7 @@ Type aliases:
 
 The backend does not provide real RuneLite screenshots. It only provides NPC ID, world, coordinates, plane, and discovered time.
 
-If `[p]implingset screenshots true` is enabled, this cog attaches a `16x16` OSRS area centered on the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane. If the map cannot be rendered quickly, the Discord post is sent without waiting for the attachment.
+If `[p]implingset screenshots true` is enabled, this cog sends the sighting post immediately, then edits the same Discord message to attach a `16x16` OSRS area centered on the sighting after the map is generated. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane. If the map cannot be rendered or the sighting message is already gone, the original Discord post is left in place without the attachment.
 
 Discord posts do not include an external map hyperlink. The `Discovered` field only uses Discord's relative timestamp, such as "5 minutes ago", and does not show the exact discovered time.
 
@@ -121,8 +121,8 @@ ImplingFinder automatically starts a read-only performance dashboard on
 the dashboard does not implement its own authentication.
 
 The dashboard tracks backend fetches, poll processing, duplicate suppression,
-routed sightings, map download/render work, Discord posting, discovery-to-post
-latency, despawn deletion, feed cleanup, errors, active backend backoffs, event-loop lag,
+routed sightings, map download/render work, Discord posting, screenshot attachment
+edits, discovery-to-post latency, despawn deletion, feed cleanup, errors, active backend backoffs, event-loop lag,
 memory use, queue health, and database size.
 
 Metrics are written through a bounded non-blocking queue so dashboard storage

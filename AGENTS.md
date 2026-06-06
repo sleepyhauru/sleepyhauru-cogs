@@ -32,7 +32,9 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 - Discord posts display World, human-readable Location, and relative
   Discovered only. Do not display coordinates, NPC ID, plane, a source footer,
   a map hyperlink, or an absolute discovered time.
-- Screenshot attachments show the current `16x16` OSRS area centered on the
+- Screenshot-enabled feed posts send the Discord message immediately, then edit
+  that same message with the generated map attachment when rendering finishes.
+  Screenshot attachments show the current `16x16` OSRS area centered on the
   sighting and place a matching impling icon on the reported game tile.
 - Preserve migration support for previously stored exact dedupe keys and coarse
   area keys when changing sighting-state behavior.
@@ -76,6 +78,9 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   It is protected by the external Traefik/VoidAuth layer, not by cog routes.
 - Metrics producers must use the bounded non-blocking queue. Never await a
   metrics write from fetch, processing, rendering, despawn, or posting paths.
+  Screenshot attachment edit metrics must include guild, channel, impling type,
+  world, human-readable location, render timing, edit timing, and end-to-end
+  latency.
 - Detailed metric events are retained for 7 days and hourly aggregates for 30
   days in `cog_data_path(self) / "metrics.sqlite3"`.
 - Dashboard routes must remain GET-only and must not change settings, trigger

@@ -64,17 +64,29 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
     async def _never_started(self):
         await __import__("asyncio").sleep(3600)
 
-    async def test_spawn_posts_use_generated_map_attachment_filename(self):
+    async def test_spawn_posts_immediately_then_edits_generated_map_attachment(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
-        guild = types.SimpleNamespace(id=123, me=None)
+        recorded = []
+        cog.metrics_store = types.SimpleNamespace(record=lambda event: recorded.append(event))
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", me=None)
         sent_messages = []
-        message = types.SimpleNamespace(id=999)
+        edited_messages = []
+
+        class Message:
+            id = 999
+
+            async def edit(self, **kwargs):
+                edited_messages.append(kwargs)
+                return self
 
         class Channel:
+            id = 456
+            name = "rare-imps"
+
             async def send(self, *args, **kwargs):
                 sent_messages.append((args, kwargs))
-                return message
+                return Message()
 
         spawn = module.ImplingSpawn(
             npcid=1644,
@@ -84,10 +96,15 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             plane=0,
             discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
         )
+        cog._location_for_spawn = lambda _spawn: "Crafting Guild"
         calls = []
+        render_started = asyncio.Event()
+        finish_render = asyncio.Event()
 
         async def make_screenshot_file(received_spawn):
             calls.append(received_spawn)
+            render_started.set()
+            await finish_render.wait()
             return module.discord.File(io.BytesIO(b"png"), filename="impling-map.png")
 
         cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
@@ -97,14 +114,40 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         )
         cog._make_screenshot_file = make_screenshot_file
 
-        sent_message = await cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True)
+        sent_message = await asyncio.wait_for(
+            cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
+            timeout=0.05,
+        )
 
-        self.assertEqual(calls, [spawn])
+        self.assertEqual(sent_message.id, 999)
         self.assertEqual(len(sent_messages), 1)
         _, kwargs = sent_messages[0]
-        self.assertEqual(kwargs["file"].filename, "impling-map.png")
-        self.assertEqual(kwargs["embed"].image, "attachment://impling-map.png")
-        self.assertIs(sent_message, message)
+        self.assertNotIn("file", kwargs)
+        self.assertIsNone(kwargs["embed"].image)
+        self.assertEqual(recorded[-1].kind, "post")
+        self.assertIsNone(recorded[-1].render_ms)
+
+        await asyncio.wait_for(render_started.wait(), timeout=0.05)
+        tasks = list(cog._screenshot_edit_tasks)
+        self.assertEqual(calls, [spawn])
+        finish_render.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=0.25)
+
+        self.assertEqual(len(edited_messages), 1)
+        edit_kwargs = edited_messages[0]
+        self.assertEqual(edit_kwargs["attachments"][0].filename, "impling-map.png")
+        self.assertEqual(edit_kwargs["embed"].image, "attachment://impling-map.png")
+        attachment_event = recorded[-1]
+        self.assertEqual(attachment_event.kind, "attachment")
+        self.assertEqual(attachment_event.outcome, "ok")
+        self.assertEqual(attachment_event.guild_name, "Impling Hunters")
+        self.assertEqual(attachment_event.channel_name, "rare-imps")
+        self.assertEqual(attachment_event.impling_type, "dragon")
+        self.assertEqual(attachment_event.world, 489)
+        self.assertEqual(attachment_event.location, "Crafting Guild")
+        self.assertIsNotNone(attachment_event.render_ms)
+        self.assertIsNotNone(attachment_event.send_ms)
+        self.assertIsNotNone(attachment_event.end_to_end_ms)
 
     async def test_successful_spawn_post_records_pipeline_timings(self):
         module = load_module("implingfinder.implingfinder")
@@ -558,24 +601,23 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         )
         cog._make_screenshot_file = slow_screenshot_file
 
-        with self.assertLogs("red.implingfinder", level="WARNING"):
-            sent_message = await asyncio.wait_for(
-                cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
-                timeout=0.25,
-            )
+        sent_message = await asyncio.wait_for(
+            cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
+            timeout=0.05,
+        )
+        for task in list(cog._screenshot_edit_tasks):
+            task.cancel()
+        await asyncio.gather(*cog._screenshot_edit_tasks, return_exceptions=True)
 
         self.assertIs(sent_message, message)
         self.assertEqual(len(sent_messages), 1)
         _args, kwargs = sent_messages[0]
         self.assertNotIn("file", kwargs)
         self.assertIsNone(kwargs["embed"].image)
-        self.assertTrue(
-            any(event.kind == "render" and event.outcome == "timeout" for event in recorded)
-        )
         post_event = recorded[-1]
         self.assertEqual(post_event.kind, "post")
         self.assertEqual(post_event.outcome, "ok")
-        self.assertIsNotNone(post_event.render_ms)
+        self.assertIsNone(post_event.render_ms)
 
     async def test_process_migrates_legacy_active_message_key_for_current_sighting(self):
         module = load_module("implingfinder.implingfinder")

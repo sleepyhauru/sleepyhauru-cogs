@@ -299,6 +299,7 @@ class MetricsStore:
             "fetches": 0,
             "polls": 0,
             "posts": 0,
+            "attachments": 0,
             "errors": 0,
             "despawns": 0,
             "duplicates": 0,
@@ -312,6 +313,8 @@ class MetricsStore:
                 totals["polls"] += count
             elif row["kind"] == "post" and row["outcome"] == "ok":
                 totals["posts"] += count
+            elif row["kind"] == "attachment" and row["outcome"] == "ok":
+                totals["attachments"] += count
             elif row["kind"] == "despawn" and row["outcome"] == "ok":
                 totals["despawns"] += count
             elif row["kind"] == "duplicate":

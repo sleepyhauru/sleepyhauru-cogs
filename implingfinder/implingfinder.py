@@ -99,6 +99,7 @@ class ImplingFinder(commands.Cog):
         self.dashboard: Optional[DashboardServer] = None
         self._started_at = time.time()
         self._startup_cleaned_guilds: set[int] = set()
+        self._screenshot_edit_tasks: set[asyncio.Task] = set()
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession(
@@ -132,6 +133,8 @@ class ImplingFinder(commands.Cog):
     def cog_unload(self) -> None:
         if self._poll_task is not None:
             self._poll_task.cancel()
+        for task in list(self._screenshot_edit_tasks):
+            task.cancel()
         self._create_task(self._close_resources())
 
     def _create_task(self, coro):
@@ -140,10 +143,18 @@ class ImplingFinder(commands.Cog):
             return loop.create_task(coro)
         return asyncio.create_task(coro)
 
+    def _create_screenshot_edit_task(self, coro) -> asyncio.Task:
+        task = self._create_task(coro)
+        self._screenshot_edit_tasks.add(task)
+        task.add_done_callback(lambda completed: self._screenshot_edit_tasks.discard(completed))
+        return task
+
     async def _close_resources(self) -> None:
         if self._poll_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
+        if self._screenshot_edit_tasks:
+            await asyncio.gather(*self._screenshot_edit_tasks, return_exceptions=True)
         if self.dashboard is not None:
             try:
                 await self.dashboard.stop()
@@ -935,6 +946,7 @@ class ImplingFinder(commands.Cog):
 
         can_embed = permissions is None or permissions.embed_links
         can_attach = permissions is None or permissions.attach_files
+        should_edit_screenshot = False
         if not can_embed:
             log.warning(
                 "Impling Finder lacks Embed Links in channel %s for guild %s; sending plain text",
@@ -945,12 +957,9 @@ class ImplingFinder(commands.Cog):
             kwargs = {"allowed_mentions": discord.AllowedMentions.none()}
         else:
             embed = self._embed_for_spawn(spawn)
-            file = None
             if screenshots:
                 if can_attach:
-                    file, render_ms = await self._make_screenshot_file_for_send(spawn)
-                    if file is not None:
-                        embed.set_image(url=f"attachment://{file.filename}")
+                    should_edit_screenshot = True
                 else:
                     log.warning(
                         "Impling Finder lacks Attach Files in channel %s for guild %s; skipping card",
@@ -962,8 +971,6 @@ class ImplingFinder(commands.Cog):
                 "embed": embed,
                 "allowed_mentions": discord.AllowedMentions.none(),
             }
-            if file is not None:
-                kwargs["file"] = file
 
         send_started = time.monotonic()
         try:
@@ -980,6 +987,17 @@ class ImplingFinder(commands.Cog):
                 render_ms=render_ms,
                 send_ms=send_ms,
             )
+            if should_edit_screenshot:
+                self._create_screenshot_edit_task(
+                    self._edit_spawn_message_with_screenshot(
+                        guild,
+                        channel,
+                        message,
+                        spawn,
+                        fetch_ms=fetch_ms,
+                        process_ms=process_ms,
+                    )
+                )
             return message
         except discord.Forbidden:
             send_ms = (time.monotonic() - send_started) * 1000
@@ -1022,6 +1040,115 @@ class ImplingFinder(commands.Cog):
             )
             return None
 
+    async def _edit_spawn_message_with_screenshot(
+        self,
+        guild: discord.Guild,
+        channel,
+        message: discord.Message,
+        spawn: ImplingSpawn,
+        *,
+        fetch_ms: Optional[float],
+        process_ms: Optional[float],
+    ) -> None:
+        total_started = time.monotonic()
+        render_ms: Optional[float] = None
+        edit_ms: Optional[float] = None
+        try:
+            render_started = time.monotonic()
+            file = await self._make_screenshot_file(spawn)
+            render_ms = (time.monotonic() - render_started) * 1000
+            if file is None:
+                self._record_attachment_metric(
+                    guild,
+                    channel,
+                    spawn,
+                    outcome="error",
+                    total_started=total_started,
+                    fetch_ms=fetch_ms,
+                    process_ms=process_ms,
+                    render_ms=render_ms,
+                    send_ms=edit_ms,
+                    error_category="render_unavailable",
+                )
+                return
+
+            embed = self._embed_for_spawn(spawn)
+            embed.set_image(url=f"attachment://{file.filename}")
+            edit_started = time.monotonic()
+            await message.edit(
+                embed=embed,
+                attachments=[file],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            edit_ms = (time.monotonic() - edit_started) * 1000
+            self._record_attachment_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="ok",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=edit_ms,
+            )
+        except asyncio.CancelledError:
+            raise
+        except discord.NotFound:
+            log.info(
+                "Impling Finder skipped map edit because message %s was gone in channel %s",
+                getattr(message, "id", "?"),
+                getattr(channel, "id", "?"),
+            )
+            self._record_attachment_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="skipped",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=edit_ms,
+                error_category="message_not_found",
+            )
+        except discord.Forbidden:
+            log.warning(
+                "Impling Finder was denied while editing map onto message %s in channel %s",
+                getattr(message, "id", "?"),
+                getattr(channel, "id", "?"),
+            )
+            self._record_attachment_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="permission_denied",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=edit_ms,
+                error_category="discord_forbidden",
+            )
+        except discord.HTTPException:
+            log.exception(
+                "Impling Finder failed to edit map onto message %s in channel %s",
+                getattr(message, "id", "?"),
+                getattr(channel, "id", "?"),
+            )
+            self._record_attachment_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="error",
+                total_started=total_started,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=edit_ms,
+                error_category="discord_http",
+            )
+
     def _record_post_metric(
         self,
         guild: discord.Guild,
@@ -1040,6 +1167,45 @@ class ImplingFinder(commands.Cog):
         self._record_metric(
             MetricEvent(
                 kind="post",
+                outcome=outcome,
+                guild_id=str(guild.id),
+                guild_name=str(getattr(guild, "name", guild.id)),
+                channel_id=str(getattr(channel, "id", "")) or None,
+                channel_name=str(getattr(channel, "name", "")) or None,
+                impling_type=spawn.type_key,
+                world=spawn.world,
+                location=self._location_for_spawn(spawn),
+                duration_ms=(time.monotonic() - total_started) * 1000,
+                fetch_ms=fetch_ms,
+                process_ms=process_ms,
+                render_ms=render_ms,
+                send_ms=send_ms,
+                end_to_end_ms=max(
+                    0.0,
+                    (now - spawn.discovered.astimezone(timezone.utc)).total_seconds() * 1000,
+                ),
+                error_category=error_category,
+            )
+        )
+
+    def _record_attachment_metric(
+        self,
+        guild: discord.Guild,
+        channel,
+        spawn: ImplingSpawn,
+        *,
+        outcome: str,
+        total_started: float,
+        fetch_ms: Optional[float],
+        process_ms: Optional[float],
+        render_ms: Optional[float],
+        send_ms: Optional[float],
+        error_category: Optional[str] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        self._record_metric(
+            MetricEvent(
+                kind="attachment",
                 outcome=outcome,
                 guild_id=str(guild.id),
                 guild_name=str(getattr(guild, "name", guild.id)),
