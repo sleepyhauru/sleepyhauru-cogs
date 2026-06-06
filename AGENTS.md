@@ -18,20 +18,20 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 - Track Magpie, Ninja, Crystal, Dragon, and Lucky implings.
 - Deduplicate sightings by NPC ID, world, plane, and official OSRS region ID:
   `((x >> 6) << 8) | (y >> 6)`.
-- Delete tracked Discord messages after a successful backend response no longer
-  contains the sighting. Keep messages tracked when deletion fails transiently
-  or from missing permissions.
+- Edit tracked Discord messages to say the impling despawned after a successful
+  backend response no longer contains the fresh sighting. Keep messages tracked
+  when the edit fails transiently or from missing permissions.
 - After a successful backend response, keep configured feed channels clean by
-  deleting non-pinned messages that are not active live impling posts. This
-  includes human messages and requires Manage Messages plus Read Message
-  History. Backend failures must not trigger feed cleanup.
+  deleting non-pinned messages that are not active live impling posts or recent
+  despawn notices. This includes human messages and requires Manage Messages
+  plus Read Message History. Backend failures must not trigger feed cleanup.
 - On cog load or reload, perform a one-time feed scrub against stored active
   message IDs so configured feed channels are cleaned promptly. This startup
   scrub must not delete tracked active messages or clear active state without a
   successful backend response.
-- Discord posts display World, human-readable Location, and relative
-  Discovered only. Do not display coordinates, NPC ID, plane, a source footer,
-  a map hyperlink, or an absolute discovered time.
+- Discord spawn posts display World, human-readable Location, coordinate
+  hyperlink to Explv zoom 7, and relative Discovered only. Do not display NPC
+  ID, plane, a source footer, or an absolute discovered time.
 - Screenshot-enabled feed posts send the Discord message immediately, then edit
   that same message with the generated map attachment when rendering finishes.
   Screenshot attachments show the current `32x32` OSRS area centered on the
@@ -61,17 +61,18 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   region, then `Near <nearest same-plane label>`, then `Unknown area`.
 - Region-based sighting keys deliberately allow a moving impling to update
   coordinates without creating duplicate Discord posts inside the same region.
-- Despawn cleanup must only follow a successful backend response. Backend
-  failures must not delete active Discord messages.
+- Despawn marking must only follow a successful backend response. Backend
+  failures must not mark or delete active Discord messages.
 - Feed-channel cleanup must only follow a successful backend response. Do not
-  delete pinned messages, and do not scan channels outside configured
-  ImplingFinder feed channels. The only exception is the one-time startup scrub,
-  which may clean non-pinned messages that are not stored as active message IDs.
+  delete pinned messages or recent despawn notices, and do not scan channels
+  outside configured ImplingFinder feed channels. The only exception is the
+  one-time startup scrub, which may clean non-pinned messages that are not
+  stored as active message IDs.
 - Map screenshots use an Explv zoom-10 crop, which corresponds to a `32x32`
   game-tile area. The matching impling asset is composited at the center of the
   final image.
-- Plain-text and generated-card fallbacks must also avoid exposing coordinates,
-  NPC ID, age, or plane.
+- Plain-text fallbacks include the same coordinate hyperlink. Generated-card
+  fallbacks must still avoid exposing coordinates, NPC ID, age, or plane.
 - Keep bundled asset names aligned with `ImplingSpawn.type_key`:
   `magpie.png`, `ninja.png`, `crystal.png`, `dragon.png`, and `lucky.png`.
 - The read-only performance dashboard starts automatically on `0.0.0.0:8765`.

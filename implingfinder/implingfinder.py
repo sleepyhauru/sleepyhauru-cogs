@@ -24,6 +24,7 @@ from .core import (
     IMPLINGS,
     MapLabel,
     MIN_POLL_INTERVAL_SECONDS,
+    build_map_url,
     build_id_endpoint,
     collapse_duplicate_sightings,
     explv_tiles_for_crop,
@@ -57,6 +58,13 @@ MAP_CROP_SIZE = 512
 IMPLING_ICON_SIZE = 72
 MAP_RENDER_SEND_TIMEOUT_SECONDS = 2.0
 FEED_CLEANUP_HISTORY_LIMIT = 100
+DESPAWN_NOTICE_RETENTION_SECONDS = 60.0
+
+
+def _display_impling_name(name: str) -> str:
+    if name.endswith(" impling"):
+        return f"{name[:-len(' impling')]} Impling"
+    return name
 
 
 class BackendError(Exception):
@@ -99,6 +107,7 @@ class ImplingFinder(commands.Cog):
         self._started_at = time.time()
         self._startup_cleaned_guilds: set[int] = set()
         self._screenshot_edit_tasks: set[asyncio.Task] = set()
+        self._despawn_notice_until_by_channel: dict[str, dict[int, float]] = {}
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession(
@@ -337,15 +346,20 @@ class ImplingFinder(commands.Cog):
     ) -> None:
         now = datetime.now(timezone.utc)
         max_age = max(0, int(settings.get("max_age_seconds", DEFAULT_MAX_AGE_SECONDS)))
-        current_sighting_keys = {spawn.sighting_key for spawn in spawns}
+        fresh_spawns = filter_stale_spawns(spawns, now, max_age)
+        current_spawns_by_key: dict[str, ImplingSpawn] = {}
+        for spawn in sorted(fresh_spawns, key=lambda item: item.discovered, reverse=True):
+            current_spawns_by_key.setdefault(spawn.sighting_key, spawn)
+        current_sighting_keys = set(current_spawns_by_key)
         current_sighting_aliases: dict[str, str] = {}
-        for spawn in spawns:
+        for spawn in fresh_spawns:
             current_sighting_aliases.setdefault(spawn.dedupe_key, spawn.sighting_key)
             current_sighting_aliases.setdefault(spawn.legacy_area_key, spawn.sighting_key)
         await self._delete_missing_active_messages(
             guild,
             current_sighting_keys,
             current_sighting_aliases,
+            current_spawns_by_key,
         )
         await self._clear_missing_seen_sightings(
             guild,
@@ -353,7 +367,6 @@ class ImplingFinder(commands.Cog):
             current_sighting_aliases,
         )
 
-        fresh_spawns = filter_stale_spawns(spawns, now, max_age)
         unique_spawns = collapse_duplicate_sightings(fresh_spawns)
         duplicate_count = max(0, len(fresh_spawns) - len(unique_spawns))
         routed_spawns = [
@@ -421,6 +434,7 @@ class ImplingFinder(commands.Cog):
         guild: discord.Guild,
         current_sighting_keys: set[str],
         current_sighting_aliases: Mapping[str, str],
+        current_spawns_by_key: Mapping[str, ImplingSpawn],
     ) -> None:
         guild_key = str(guild.id)
         async with self.config.active_messages() as active_messages:
@@ -436,25 +450,36 @@ class ImplingFinder(commands.Cog):
                     current_sighting_keys,
                     current_sighting_aliases,
                 )
-                if migrated_key is not None and migrated_key != spawn_key:
+                if migrated_key is not None:
                     if isinstance(channel_messages, dict):
-                        migrated_messages = guild_messages.get(migrated_key)
-                        if not isinstance(migrated_messages, dict):
-                            migrated_messages = {}
-                            guild_messages[migrated_key] = migrated_messages
-                        migrated_messages.update(channel_messages)
-                    guild_messages.pop(spawn_key, None)
-                    continue
-
-                if spawn_key in current_sighting_keys:
+                        target_messages = channel_messages
+                        if migrated_key != spawn_key:
+                            migrated_messages = guild_messages.get(migrated_key)
+                            if not isinstance(migrated_messages, dict):
+                                migrated_messages = {}
+                                guild_messages[migrated_key] = migrated_messages
+                            migrated_messages.update(channel_messages)
+                            guild_messages.pop(spawn_key, None)
+                            target_messages = migrated_messages
+                        self._hydrate_active_message_records(
+                            target_messages,
+                            current_spawns_by_key.get(migrated_key),
+                        )
+                    else:
+                        guild_messages.pop(spawn_key, None)
                     continue
 
                 if not isinstance(channel_messages, dict):
                     guild_messages.pop(spawn_key, None)
                     continue
 
-                for channel_id, message_id in list(channel_messages.items()):
-                    if await self._delete_tracked_message(guild, channel_id, message_id):
+                for channel_id, message_record in list(channel_messages.items()):
+                    if await self._mark_tracked_message_despawned(
+                        guild,
+                        channel_id,
+                        message_record,
+                        spawn_key,
+                    ):
                         channel_messages.pop(channel_id, None)
 
                 if not channel_messages:
@@ -501,61 +526,252 @@ class ImplingFinder(commands.Cog):
             return legacy_key
         return None
 
-    async def _delete_tracked_message(
+    def _hydrate_active_message_records(
+        self,
+        channel_messages: dict[Any, Any],
+        spawn: Optional[ImplingSpawn],
+    ) -> None:
+        if spawn is None:
+            return
+        for channel_id, message_record in list(channel_messages.items()):
+            message_id = self._tracked_message_id(message_record)
+            if message_id is None:
+                channel_messages.pop(channel_id, None)
+                continue
+            channel_messages[channel_id] = self._active_message_record(message_id, spawn)
+
+    def _tracked_message_id(self, message_record: Any) -> Optional[int]:
+        raw_message_id = (
+            message_record.get("message_id")
+            if isinstance(message_record, Mapping)
+            else message_record
+        )
+        try:
+            return int(raw_message_id)
+        except (TypeError, ValueError):
+            return None
+
+    def _active_message_record(self, message_id: int, spawn: ImplingSpawn) -> dict[str, int]:
+        return {
+            "message_id": int(message_id),
+            "npcid": int(spawn.npcid),
+            "world": int(spawn.world),
+            "xcoord": int(spawn.xcoord),
+            "ycoord": int(spawn.ycoord),
+            "plane": int(spawn.plane),
+            "discovered_epoch": int(spawn.discovered_epoch),
+        }
+
+    def _spawn_from_active_message_record(
+        self,
+        spawn_key: str,
+        message_record: Any,
+    ) -> Optional[ImplingSpawn]:
+        if isinstance(message_record, Mapping):
+            try:
+                return ImplingSpawn(
+                    npcid=int(message_record["npcid"]),
+                    world=int(message_record["world"]),
+                    xcoord=int(message_record["xcoord"]),
+                    ycoord=int(message_record["ycoord"]),
+                    plane=int(message_record["plane"]),
+                    discovered=datetime.fromtimestamp(
+                        int(message_record["discovered_epoch"]),
+                        timezone.utc,
+                    ),
+                )
+            except (KeyError, TypeError, ValueError, OSError):
+                pass
+
+        parts = str(spawn_key).split(":")
+        if len(parts) != 6:
+            return None
+        try:
+            npcid, world, xcoord, ycoord, plane, discovered_epoch = map(int, parts)
+        except ValueError:
+            return None
+        return ImplingSpawn(
+            npcid=npcid,
+            world=world,
+            xcoord=xcoord,
+            ycoord=ycoord,
+            plane=plane,
+            discovered=datetime.fromtimestamp(discovered_epoch, timezone.utc),
+        )
+
+    def _impling_name_from_spawn_key(self, spawn_key: str) -> str:
+        parts = str(spawn_key).split(":")
+        try:
+            npcid = int(parts[0])
+        except (IndexError, TypeError, ValueError):
+            return "Impling"
+        for info in IMPLINGS.values():
+            if info.npcid == npcid:
+                return _display_impling_name(info.name)
+        return f"NPC {npcid}"
+
+    async def _mark_tracked_message_despawned(
         self,
         guild: discord.Guild,
         channel_id: Any,
-        message_id: Any,
+        message_record: Any,
+        spawn_key: str,
     ) -> bool:
-        delete_started = time.monotonic()
+        despawn_started = time.monotonic()
         try:
             clean_channel_id = int(channel_id)
-            clean_message_id = int(message_id)
+            clean_message_id = self._tracked_message_id(message_record)
         except (TypeError, ValueError):
+            return True
+        if clean_message_id is None:
             return True
 
         channel = guild.get_channel(clean_channel_id)
         if channel is None:
             log.warning(
-                "Impling Finder cannot delete despawned message %s; channel %s is missing",
+                "Impling Finder cannot mark despawned message %s; channel %s is missing",
                 clean_message_id,
                 clean_channel_id,
             )
+            self._record_despawn_metric(
+                guild,
+                None,
+                None,
+                outcome="skipped",
+                started=despawn_started,
+                error_category="channel_missing",
+            )
             return True
 
+        spawn = self._spawn_from_active_message_record(spawn_key, message_record)
         try:
             if hasattr(channel, "get_partial_message"):
                 message = channel.get_partial_message(clean_message_id)
             else:
                 message = await channel.fetch_message(clean_message_id)
-            await message.delete()
-            self._record_metric(
-                MetricEvent(
-                    kind="despawn",
-                    guild_id=str(guild.id),
-                    guild_name=str(getattr(guild, "name", guild.id)),
-                    channel_id=str(clean_channel_id),
-                    channel_name=str(getattr(channel, "name", "")) or None,
-                    duration_ms=(time.monotonic() - delete_started) * 1000,
+            kwargs: dict[str, Any] = {
+                "attachments": [],
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            permissions = self._bot_permissions(guild, channel)
+            can_embed = permissions is None or getattr(permissions, "embed_links", False)
+            if spawn is not None and can_embed:
+                kwargs.update(
+                    content=None,
+                    embed=self._embed_for_spawn(spawn, status="despawned"),
                 )
+            else:
+                kwargs.update(
+                    content=self._content_for_despawn(spawn, spawn_key),
+                    embed=None,
+                )
+            await message.edit(**kwargs)
+            self._remember_despawn_notice(clean_channel_id, clean_message_id)
+            self._record_despawn_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="ok",
+                started=despawn_started,
             )
             return True
         except discord.NotFound:
+            self._record_despawn_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="skipped",
+                started=despawn_started,
+                error_category="message_not_found",
+            )
             return True
         except discord.Forbidden:
             log.warning(
-                "Impling Finder lacks permission to delete despawned message %s in channel %s",
+                "Impling Finder lacks permission to mark despawned message %s in channel %s",
                 clean_message_id,
                 clean_channel_id,
+            )
+            self._record_despawn_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="permission_denied",
+                started=despawn_started,
+                error_category="discord_forbidden",
             )
             return False
         except discord.HTTPException:
             log.exception(
-                "Impling Finder failed to delete despawned message %s in channel %s",
+                "Impling Finder failed to mark despawned message %s in channel %s",
                 clean_message_id,
                 clean_channel_id,
             )
+            self._record_despawn_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="error",
+                started=despawn_started,
+                error_category="discord_http",
+            )
             return False
+
+    def _record_despawn_metric(
+        self,
+        guild: discord.Guild,
+        channel,
+        spawn: Optional[ImplingSpawn],
+        *,
+        outcome: str,
+        started: float,
+        error_category: Optional[str] = None,
+    ) -> None:
+        self._record_metric(
+            MetricEvent(
+                kind="despawn",
+                outcome=outcome,
+                guild_id=str(guild.id),
+                guild_name=str(getattr(guild, "name", guild.id)),
+                channel_id=str(getattr(channel, "id", "")) if channel is not None else None,
+                channel_name=(
+                    str(getattr(channel, "name", "")) or None
+                    if channel is not None
+                    else None
+                ),
+                impling_type=spawn.type_key if spawn is not None else None,
+                world=spawn.world if spawn is not None else None,
+                location=self._location_for_spawn(spawn) if spawn is not None else None,
+                duration_ms=(time.monotonic() - started) * 1000,
+                error_category=error_category,
+            )
+        )
+
+    def _remember_despawn_notice(self, channel_id: int, message_id: int) -> None:
+        channel_key = str(int(channel_id))
+        self._despawn_notice_until_by_channel.setdefault(channel_key, {})[
+            int(message_id)
+        ] = time.monotonic() + DESPAWN_NOTICE_RETENTION_SECONDS
+
+    def _despawn_notice_ids_by_channel(self) -> dict[str, set[int]]:
+        now = time.monotonic()
+        active_notice_ids: dict[str, set[int]] = {}
+        for channel_id, message_expirations in list(self._despawn_notice_until_by_channel.items()):
+            for message_id, expires_at in list(message_expirations.items()):
+                if expires_at <= now:
+                    message_expirations.pop(message_id, None)
+                    continue
+                active_notice_ids.setdefault(channel_id, set()).add(message_id)
+            if not message_expirations:
+                self._despawn_notice_until_by_channel.pop(channel_id, None)
+        return active_notice_ids
+
+    def _is_despawn_notice(self, channel_id: Any, message_id: Any) -> bool:
+        try:
+            channel_key = str(int(channel_id))
+            clean_message_id = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        return clean_message_id in self._despawn_notice_ids_by_channel().get(channel_key, set())
 
     async def _record_active_message(
         self,
@@ -586,7 +802,10 @@ class ImplingFinder(commands.Cog):
                 spawn_messages = {}
                 guild_messages[spawn.sighting_key] = spawn_messages
 
-            spawn_messages[clean_channel_id] = clean_message_id
+            spawn_messages[clean_channel_id] = self._active_message_record(
+                clean_message_id,
+                spawn,
+            )
 
     async def _clean_feed_channels(
         self,
@@ -603,6 +822,8 @@ class ImplingFinder(commands.Cog):
             return
 
         active_message_ids = await self._active_message_ids_by_channel(guild.id)
+        for channel_id, notice_ids in self._despawn_notice_ids_by_channel().items():
+            active_message_ids.setdefault(channel_id, set()).update(notice_ids)
         for channel_id in sorted(channel_ids):
             channel = guild.get_channel(channel_id)
             if channel is None:
@@ -623,13 +844,15 @@ class ImplingFinder(commands.Cog):
         for channel_messages in guild_messages.values():
             if not isinstance(channel_messages, dict):
                 continue
-            for channel_id, message_id in channel_messages.items():
+            for channel_id, message_record in channel_messages.items():
+                message_id = self._tracked_message_id(message_record)
+                if message_id is None:
+                    continue
                 try:
                     clean_channel_id = str(int(channel_id))
-                    clean_message_id = int(message_id)
                 except (TypeError, ValueError):
                     continue
-                active_by_channel.setdefault(clean_channel_id, set()).add(clean_message_id)
+                active_by_channel.setdefault(clean_channel_id, set()).add(message_id)
         return active_by_channel
 
     async def _clean_feed_channel(
@@ -886,18 +1109,37 @@ class ImplingFinder(commands.Cog):
     def _location_for_spawn(self, spawn: ImplingSpawn) -> str:
         return resolve_location_name(spawn, self._map_labels)
 
-    def _embed_for_spawn(self, spawn: ImplingSpawn, *, now: Optional[datetime] = None) -> discord.Embed:
+    def _display_name_for_spawn(self, spawn: ImplingSpawn) -> str:
+        return _display_impling_name(spawn.impling_name)
+
+    def _coordinate_link_for_spawn(self, spawn: ImplingSpawn) -> str:
+        return f"[{spawn.xcoord}, {spawn.ycoord}]({build_map_url(spawn, zoom=7)})"
+
+    def _embed_for_spawn(
+        self,
+        spawn: ImplingSpawn,
+        *,
+        status: str = "spawned",
+        now: Optional[datetime] = None,
+    ) -> discord.Embed:
         type_key = spawn.type_key or "dragon"
         info = IMPLINGS.get(type_key)
         color = info.color if info is not None else 0x5865F2
+        if status == "despawned":
+            color = 0x747F8D
         location = self._location_for_spawn(spawn)
 
         embed = discord.Embed(
-            title=f"{spawn.impling_name} spotted",
+            title=f"{self._display_name_for_spawn(spawn)} {status}",
             color=color,
         )
         embed.add_field(name="World", value=str(spawn.world), inline=True)
         embed.add_field(name="Location", value=location, inline=True)
+        embed.add_field(
+            name="Coordinates",
+            value=self._coordinate_link_for_spawn(spawn),
+            inline=True,
+        )
         embed.add_field(
             name="Discovered",
             value=f"<t:{spawn.discovered_epoch}:R>",
@@ -907,8 +1149,20 @@ class ImplingFinder(commands.Cog):
 
     def _content_for_spawn(self, spawn: ImplingSpawn) -> str:
         return (
-            f"{spawn.impling_name} spotted on world {spawn.world} at "
-            f"{self._location_for_spawn(spawn)}."
+            f"{self._display_name_for_spawn(spawn)} spawned on world {spawn.world} at "
+            f"{self._location_for_spawn(spawn)} ({self._coordinate_link_for_spawn(spawn)})."
+        )
+
+    def _content_for_despawn(
+        self,
+        spawn: Optional[ImplingSpawn],
+        spawn_key: str,
+    ) -> str:
+        if spawn is None:
+            return f"{self._impling_name_from_spawn_key(spawn_key)} despawned"
+        return (
+            f"{self._display_name_for_spawn(spawn)} despawned on world {spawn.world} at "
+            f"{self._location_for_spawn(spawn)} ({self._coordinate_link_for_spawn(spawn)})."
         )
 
     async def _send_spawn_to_channel(
@@ -1053,6 +1307,24 @@ class ImplingFinder(commands.Cog):
         render_ms: Optional[float] = None
         edit_ms: Optional[float] = None
         try:
+            if self._is_despawn_notice(
+                getattr(channel, "id", None),
+                getattr(message, "id", None),
+            ):
+                self._record_attachment_metric(
+                    guild,
+                    channel,
+                    spawn,
+                    outcome="skipped",
+                    total_started=total_started,
+                    fetch_ms=fetch_ms,
+                    process_ms=process_ms,
+                    render_ms=render_ms,
+                    send_ms=edit_ms,
+                    error_category="message_despawned",
+                )
+                return
+
             render_started = time.monotonic()
             file = await self._make_screenshot_file(spawn)
             render_ms = (time.monotonic() - render_started) * 1000
@@ -1068,6 +1340,24 @@ class ImplingFinder(commands.Cog):
                     render_ms=render_ms,
                     send_ms=edit_ms,
                     error_category="render_unavailable",
+                )
+                return
+
+            if self._is_despawn_notice(
+                getattr(channel, "id", None),
+                getattr(message, "id", None),
+            ):
+                self._record_attachment_metric(
+                    guild,
+                    channel,
+                    spawn,
+                    outcome="skipped",
+                    total_started=total_started,
+                    fetch_ms=fetch_ms,
+                    process_ms=process_ms,
+                    render_ms=render_ms,
+                    send_ms=edit_ms,
+                    error_category="message_despawned",
                 )
                 return
 

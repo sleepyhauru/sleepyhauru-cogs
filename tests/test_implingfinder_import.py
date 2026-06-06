@@ -298,6 +298,17 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         return result
 
+    def _active_message_record(self, spawn, message_id):
+        return {
+            "message_id": message_id,
+            "npcid": spawn.npcid,
+            "world": spawn.world,
+            "xcoord": spawn.xcoord,
+            "ycoord": spawn.ycoord,
+            "plane": spawn.plane,
+            "discovered_epoch": spawn.discovered_epoch,
+        }
+
     async def test_interval_command_accepts_five_second_minimum(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -314,11 +325,11 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cog.config.guild(guild).poll_interval(), 5)
         self.assertEqual(replies, ["Polling interval set to `5s`."])
 
-    async def test_embed_uses_human_location_and_omits_internal_spawn_fields(self):
+    async def test_embed_uses_spawned_title_and_coordinate_map_link(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
         spawn = module.ImplingSpawn(
-            npcid=1644,
+            npcid=8741,
             world=489,
             xcoord=3210,
             ycoord=3420,
@@ -329,42 +340,52 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         embed = cog._embed_for_spawn(spawn)
 
+        self.assertEqual(embed.title, "Crystal Impling spawned")
         self.assertEqual(
             [field.name for field in embed.fields],
-            ["World", "Location", "Discovered"],
+            ["World", "Location", "Coordinates", "Discovered"],
         )
         self.assertEqual(embed.fields[1].value, "Varrock")
-        self.assertEqual(embed.fields[2].value, "<t:1715000000:R>")
-        self.assertNotIn("<t:1715000000:F>", embed.fields[2].value)
+        self.assertEqual(
+            embed.fields[2].value,
+            "[3210, 3420](https://explv.github.io/?centreX=3210&centreY=3420&centreZ=0&zoom=7)",
+        )
+        self.assertEqual(embed.fields[3].value, "<t:1715000000:R>")
+        self.assertNotIn("<t:1715000000:F>", embed.fields[3].value)
         self.assertIsNone(embed.url)
         self.assertIsNone(embed.timestamp)
         self.assertIsNone(embed.footer)
         content = cog._content_for_spawn(spawn)
         self.assertIn("Varrock", content)
-        self.assertNotIn("3210", content)
+        self.assertIn("https://explv.github.io/?centreX=3210&centreY=3420&centreZ=0&zoom=7", content)
         self.assertNotIn("plane", content.lower())
 
-    async def test_process_deletes_tracked_message_when_spawn_disappears(self):
+    async def test_process_marks_tracked_message_despawned_when_spawn_disappears(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
         recorded = []
         cog.metrics_store = types.SimpleNamespace(record=lambda event: recorded.append(event))
         old_spawn = module.ImplingSpawn(
-            npcid=1644,
+            npcid=8741,
             world=489,
             xcoord=2914,
             ycoord=3323,
             plane=0,
             discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
         )
+        edited = []
         deleted = []
 
         class PartialMessage:
+            async def edit(self, **kwargs):
+                edited.append(kwargs)
+
             async def delete(self):
                 deleted.append(222)
 
         class Channel:
             id = 111
+            name = "crystal-imps"
 
             def get_partial_message(self, message_id):
                 self.message_id = message_id
@@ -373,7 +394,19 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         channel = Channel()
         guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: channel)
         cog.config._global_store["active_messages"] = {
-            "123": {old_spawn.dedupe_key: {"111": 222}}
+            "123": {
+                old_spawn.sighting_key: {
+                    "111": {
+                        "message_id": 222,
+                        "npcid": old_spawn.npcid,
+                        "world": old_spawn.world,
+                        "xcoord": old_spawn.xcoord,
+                        "ycoord": old_spawn.ycoord,
+                        "plane": old_spawn.plane,
+                        "discovered_epoch": old_spawn.discovered_epoch,
+                    }
+                }
+            }
         }
 
         await cog._process_polled_spawns(
@@ -383,11 +416,65 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
-        self.assertEqual(deleted, [222])
+        self.assertEqual(deleted, [])
+        self.assertEqual(len(edited), 1)
+        self.assertEqual(edited[0]["embed"].title, "Crystal Impling despawned")
+        self.assertEqual(edited[0]["attachments"], [])
         self.assertEqual(channel.message_id, 222)
         self.assertEqual(cog.config._global_store["active_messages"], {})
         self.assertEqual(recorded[-1].kind, "despawn")
         self.assertEqual(recorded[-1].outcome, "ok")
+
+    async def test_process_despawns_when_only_stale_backend_row_remains(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        old_spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        edited = []
+
+        class PartialMessage:
+            async def edit(self, **kwargs):
+                edited.append(kwargs)
+
+        class Channel:
+            id = 111
+
+            def get_partial_message(self, _message_id):
+                return PartialMessage()
+
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: Channel())
+        cog.config._global_store["active_messages"] = {
+            "123": {
+                old_spawn.sighting_key: {
+                    "111": {
+                        "message_id": 222,
+                        "npcid": old_spawn.npcid,
+                        "world": old_spawn.world,
+                        "xcoord": old_spawn.xcoord,
+                        "ycoord": old_spawn.ycoord,
+                        "plane": old_spawn.plane,
+                        "discovered_epoch": old_spawn.discovered_epoch,
+                    }
+                }
+            }
+        }
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 1, "announce_existing": False, "screenshots": False},
+            {"111": [1644]},
+            [old_spawn],
+        )
+
+        self.assertEqual(len(edited), 1)
+        self.assertEqual(edited[0]["embed"].title, "Dragon Impling despawned")
+        self.assertEqual(cog.config._global_store["active_messages"], {})
 
     async def test_process_cleans_feed_channel_when_no_live_spawns(self):
         module = load_module("implingfinder.implingfinder")
@@ -427,6 +514,40 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(deleted, [10])
         self.assertEqual(channel.history_limit, module.FEED_CLEANUP_HISTORY_LIMIT)
+
+    async def test_feed_cleanup_keeps_recent_despawn_notice(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        deleted = []
+
+        class Message:
+            def __init__(self, message_id):
+                self.id = message_id
+                self.pinned = False
+
+            async def delete(self):
+                deleted.append(self.id)
+
+        class Channel:
+            id = 111
+            name = "rare-imps"
+
+            async def history(self, *, limit):
+                self.history_limit = limit
+                for message in [Message(222), Message(10)]:
+                    yield message
+
+        channel = Channel()
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda channel_id: channel)
+        cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
+            manage_messages=True,
+            read_message_history=True,
+        )
+        cog._remember_despawn_notice(channel.id, 222)
+
+        await cog._clean_feed_channels(guild, {"111": [1644]})
+
+        self.assertEqual(deleted, [10])
 
     async def test_process_cleans_feed_channel_but_keeps_active_and_pinned_messages(self):
         module = load_module("implingfinder.implingfinder")
@@ -622,6 +743,50 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(post_event.outcome, "ok")
         self.assertIsNone(post_event.render_ms)
 
+    async def test_screenshot_edit_skips_message_already_marked_despawned(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        recorded = []
+        edited = []
+        cog.metrics_store = types.SimpleNamespace(record=lambda event: recorded.append(event))
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters")
+
+        class Message:
+            id = 999
+
+            async def edit(self, **kwargs):
+                edited.append(kwargs)
+
+        channel = types.SimpleNamespace(id=456, name="rare-imps")
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+
+        async def make_screenshot_file(_spawn):
+            return module.discord.File(io.BytesIO(b"png"), filename="impling-map.png")
+
+        cog._make_screenshot_file = make_screenshot_file
+        cog._remember_despawn_notice(channel.id, Message.id)
+
+        await cog._edit_spawn_message_with_screenshot(
+            guild,
+            channel,
+            Message(),
+            spawn,
+            fetch_ms=None,
+            process_ms=None,
+        )
+
+        self.assertEqual(edited, [])
+        self.assertEqual(recorded[-1].kind, "attachment")
+        self.assertEqual(recorded[-1].outcome, "skipped")
+        self.assertEqual(recorded[-1].error_category, "message_despawned")
+
     async def test_process_migrates_legacy_active_message_key_for_current_sighting(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -658,7 +823,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deleted, [])
         self.assertEqual(
             cog.config._global_store["active_messages"],
-            {"123": {spawn.sighting_key: {"111": 222}}},
+            {"123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}},
         )
 
     async def test_process_migrates_deployed_coarse_area_key_for_current_sighting(self):
@@ -686,7 +851,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             cog.config._global_store["active_messages"],
-            {"123": {spawn.sighting_key: {"111": 222}}},
+            {"123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}},
         )
 
     async def test_process_records_sent_message_for_active_spawn(self):
@@ -719,7 +884,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, [(spawn, True)])
         self.assertEqual(
             cog.config._global_store["active_messages"],
-            {"123": {spawn.sighting_key: {"111": 333}}},
+            {"123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 333)}}},
         )
 
     async def test_process_posts_one_message_for_duplicate_moving_rows(self):
@@ -762,7 +927,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, [newer])
         self.assertEqual(
             cog.config._global_store["active_messages"],
-            {"123": {newer.sighting_key: {"111": 445}}},
+            {"123": {newer.sighting_key: {"111": self._active_message_record(newer, 445)}}},
         )
         self.assertEqual(
             [(event.kind, event.count_value) for event in recorded if event.kind in {"duplicate", "routed"}],
