@@ -21,10 +21,14 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 - Delete tracked Discord messages after a successful backend response no longer
   contains the sighting. Keep messages tracked when deletion fails transiently
   or from missing permissions.
+- After a successful backend response, keep configured feed channels clean by
+  deleting non-pinned messages that are not active live impling posts. This
+  includes human messages and requires Manage Messages plus Read Message
+  History. Backend failures must not trigger feed cleanup.
 - Discord posts display World, human-readable Location, Discovered, and Map.
   Do not display coordinates, NPC ID, age, plane, or a source footer.
-- Screenshot attachments show exactly the current `8x8` OSRS chunk and place a
-  matching impling icon on the reported game tile.
+- Screenshot attachments show the current `16x16` OSRS area centered on the
+  sighting and place a matching impling icon on the reported game tile.
 - Preserve migration support for previously stored exact dedupe keys and coarse
   area keys when changing sighting-state behavior.
 
@@ -52,8 +56,11 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   coordinates without creating duplicate Discord posts inside the same region.
 - Despawn cleanup must only follow a successful backend response. Backend
   failures must not delete active Discord messages.
-- Map screenshots use one Explv zoom-11 tile, which corresponds to one current
-  `8x8` game chunk. The image is enlarged with nearest-neighbor scaling before
+- Feed-channel cleanup must only follow a successful backend response. Do not
+  delete pinned messages, and do not scan channels outside configured
+  ImplingFinder feed channels.
+- Map screenshots use an Explv zoom-10 crop, which corresponds to a `16x16`
+  game-tile area. The image is enlarged with nearest-neighbor scaling before
   compositing the matching impling asset.
 - Plain-text and generated-card fallbacks must also avoid exposing coordinates,
   NPC ID, age, or plane.

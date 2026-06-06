@@ -58,6 +58,7 @@ MAP_TILE_ZOOM = 10
 MAP_CROP_SIZE = 256
 IMPLING_ICON_SIZE = 72
 MAP_RENDER_SEND_TIMEOUT_SECONDS = 2.0
+FEED_CLEANUP_HISTORY_LIMIT = 100
 
 
 class BackendError(Exception):
@@ -366,36 +367,42 @@ class ImplingFinder(commands.Cog):
                     count_value=len(routed_spawns),
                 )
             )
-        if not routed_spawns:
-            return
 
-        guild_key = guild_id
-        async with self.config.seen() as seen:
-            current_seen = list(seen.get(guild_key, []))
-            to_announce, updated_seen = select_unseen_spawns(
-                routed_spawns,
-                current_seen,
-                announce_existing=bool(settings.get("announce_existing", False)),
-            )
-            seen[guild_key] = updated_seen
+        if routed_spawns:
+            guild_key = guild_id
+            async with self.config.seen() as seen:
+                current_seen = list(seen.get(guild_key, []))
+                to_announce, updated_seen = select_unseen_spawns(
+                    routed_spawns,
+                    current_seen,
+                    announce_existing=bool(settings.get("announce_existing", False)),
+                )
+                seen[guild_key] = updated_seen
 
-        for spawn in to_announce:
-            for channel_id in matching_channel_ids(channels, spawn):
-                channel = guild.get_channel(channel_id)
-                if channel is None:
-                    log.warning(
-                        "Impling Finder channel %s no longer exists in guild %s",
-                        channel_id,
-                        guild.id,
+            for spawn in to_announce:
+                for channel_id in matching_channel_ids(channels, spawn):
+                    channel = guild.get_channel(channel_id)
+                    if channel is None:
+                        log.warning(
+                            "Impling Finder channel %s no longer exists in guild %s",
+                            channel_id,
+                            guild.id,
+                        )
+                        continue
+                    send_kwargs = {"screenshots": bool(settings.get("screenshots", False))}
+                    if fetch_ms is not None:
+                        send_kwargs["fetch_ms"] = fetch_ms
+                    if process_started is not None:
+                        send_kwargs["process_ms"] = (time.monotonic() - process_started) * 1000
+                    message = await self._send_spawn_to_channel(
+                        guild,
+                        channel,
+                        spawn,
+                        **send_kwargs,
                     )
-                    continue
-                send_kwargs = {"screenshots": bool(settings.get("screenshots", False))}
-                if fetch_ms is not None:
-                    send_kwargs["fetch_ms"] = fetch_ms
-                if process_started is not None:
-                    send_kwargs["process_ms"] = (time.monotonic() - process_started) * 1000
-                message = await self._send_spawn_to_channel(guild, channel, spawn, **send_kwargs)
-                await self._record_active_message(guild, spawn, channel_id, message)
+                    await self._record_active_message(guild, spawn, channel_id, message)
+
+        await self._clean_feed_channels(guild, channels)
 
     async def _delete_missing_active_messages(
         self,
@@ -568,6 +575,194 @@ class ImplingFinder(commands.Cog):
                 guild_messages[spawn.sighting_key] = spawn_messages
 
             spawn_messages[clean_channel_id] = clean_message_id
+
+    async def _clean_feed_channels(
+        self,
+        guild: discord.Guild,
+        channels: Mapping[str, list[int]],
+    ) -> None:
+        channel_ids: set[int] = set()
+        for channel_id in channels:
+            try:
+                channel_ids.add(int(channel_id))
+            except (TypeError, ValueError):
+                continue
+        if not channel_ids:
+            return
+
+        active_message_ids = await self._active_message_ids_by_channel(guild.id)
+        for channel_id in sorted(channel_ids):
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                continue
+            await self._clean_feed_channel(
+                guild,
+                channel,
+                active_message_ids.get(str(channel_id), set()),
+            )
+
+    async def _active_message_ids_by_channel(self, guild_id: int) -> dict[str, set[int]]:
+        active_messages = await self.config.active_messages()
+        guild_messages = active_messages.get(str(guild_id))
+        active_by_channel: dict[str, set[int]] = {}
+        if not isinstance(guild_messages, dict):
+            return active_by_channel
+
+        for channel_messages in guild_messages.values():
+            if not isinstance(channel_messages, dict):
+                continue
+            for channel_id, message_id in channel_messages.items():
+                try:
+                    clean_channel_id = str(int(channel_id))
+                    clean_message_id = int(message_id)
+                except (TypeError, ValueError):
+                    continue
+                active_by_channel.setdefault(clean_channel_id, set()).add(clean_message_id)
+        return active_by_channel
+
+    async def _clean_feed_channel(
+        self,
+        guild: discord.Guild,
+        channel,
+        active_message_ids: set[int],
+    ) -> None:
+        permissions = self._bot_permissions(guild, channel)
+        if permissions is not None:
+            if not getattr(permissions, "manage_messages", False):
+                log.warning(
+                    "Impling Finder cannot clean channel %s in guild %s without Manage Messages",
+                    getattr(channel, "id", "?"),
+                    guild.id,
+                )
+                self._record_feed_cleanup_metric(
+                    guild,
+                    channel,
+                    outcome="permission_denied",
+                    error_category="manage_messages",
+                )
+                return
+            if not getattr(permissions, "read_message_history", False):
+                log.warning(
+                    "Impling Finder cannot clean channel %s in guild %s without Read Message History",
+                    getattr(channel, "id", "?"),
+                    guild.id,
+                )
+                self._record_feed_cleanup_metric(
+                    guild,
+                    channel,
+                    outcome="permission_denied",
+                    error_category="read_message_history",
+                )
+                return
+
+        if not hasattr(channel, "history"):
+            return
+
+        cleanup_started = time.monotonic()
+        deleted_count = 0
+        try:
+            async for message in channel.history(limit=FEED_CLEANUP_HISTORY_LIMIT):
+                try:
+                    message_id = int(getattr(message, "id"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if message_id in active_message_ids or getattr(message, "pinned", False):
+                    continue
+
+                try:
+                    await message.delete()
+                    deleted_count += 1
+                except discord.NotFound:
+                    continue
+                except discord.Forbidden:
+                    log.warning(
+                        "Impling Finder was denied while cleaning message %s in channel %s",
+                        message_id,
+                        getattr(channel, "id", "?"),
+                    )
+                    self._record_feed_cleanup_metric(
+                        guild,
+                        channel,
+                        outcome="permission_denied",
+                        started=cleanup_started,
+                        count_value=max(1, deleted_count),
+                        error_category="discord_forbidden",
+                    )
+                    return
+                except discord.HTTPException:
+                    log.exception(
+                        "Impling Finder failed to clean message %s in channel %s",
+                        message_id,
+                        getattr(channel, "id", "?"),
+                    )
+                    self._record_feed_cleanup_metric(
+                        guild,
+                        channel,
+                        outcome="error",
+                        started=cleanup_started,
+                        count_value=max(1, deleted_count),
+                        error_category="discord_http",
+                    )
+                    continue
+        except discord.Forbidden:
+            log.warning(
+                "Impling Finder was denied while reading history in channel %s",
+                getattr(channel, "id", "?"),
+            )
+            self._record_feed_cleanup_metric(
+                guild,
+                channel,
+                outcome="permission_denied",
+                started=cleanup_started,
+                count_value=max(1, deleted_count),
+                error_category="history_forbidden",
+            )
+        except discord.HTTPException:
+            log.exception(
+                "Impling Finder failed to read history while cleaning channel %s",
+                getattr(channel, "id", "?"),
+            )
+            self._record_feed_cleanup_metric(
+                guild,
+                channel,
+                outcome="error",
+                started=cleanup_started,
+                count_value=max(1, deleted_count),
+                error_category="history_http",
+            )
+        finally:
+            if deleted_count:
+                self._record_feed_cleanup_metric(
+                    guild,
+                    channel,
+                    outcome="ok",
+                    started=cleanup_started,
+                    count_value=deleted_count,
+                )
+
+    def _record_feed_cleanup_metric(
+        self,
+        guild: discord.Guild,
+        channel,
+        *,
+        outcome: str,
+        started: Optional[float] = None,
+        count_value: int = 1,
+        error_category: Optional[str] = None,
+    ) -> None:
+        self._record_metric(
+            MetricEvent(
+                kind="cleanup",
+                outcome=outcome,
+                guild_id=str(guild.id),
+                guild_name=str(getattr(guild, "name", guild.id)),
+                channel_id=str(getattr(channel, "id", "")) or None,
+                channel_name=str(getattr(channel, "name", "")) or None,
+                duration_ms=(time.monotonic() - started) * 1000 if started is not None else None,
+                count_value=max(1, int(count_value)),
+                error_category=error_category,
+            )
+        )
 
     async def _cog_disabled_in_guild(self, guild: discord.Guild) -> bool:
         checker = getattr(self.bot, "cog_disabled_in_guild", None)

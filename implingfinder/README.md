@@ -96,6 +96,8 @@ The backend can report the same moving impling several times with slightly diffe
 
 When a tracked sighting disappears from the latest successful backend response, the cog deletes the Discord message it posted for that sighting and removes the stored message ID. Messages are kept for retry if Discord rejects the delete because of permissions or a transient API error.
 
+After each successful backend response, configured ImplingFinder feed channels are also cleaned so they only contain active live impling posts. The cleanup deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger feed cleanup.
+
 For competitive hunting, set the interval to the minimum:
 
 ```text
@@ -116,7 +118,7 @@ the dashboard does not implement its own authentication.
 
 The dashboard tracks backend fetches, poll processing, duplicate suppression,
 routed sightings, map download/render work, Discord posting, discovery-to-post
-latency, despawn deletion, errors, active backend backoffs, event-loop lag,
+latency, despawn deletion, feed cleanup, errors, active backend backoffs, event-loop lag,
 memory use, queue health, and database size.
 
 Metrics are written through a bounded non-blocking queue so dashboard storage

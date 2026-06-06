@@ -304,6 +304,99 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded[-1].kind, "despawn")
         self.assertEqual(recorded[-1].outcome, "ok")
 
+    async def test_process_cleans_feed_channel_when_no_live_spawns(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        deleted = []
+
+        class Message:
+            def __init__(self, message_id, *, pinned=False):
+                self.id = message_id
+                self.pinned = pinned
+
+            async def delete(self):
+                deleted.append(self.id)
+
+        class Channel:
+            id = 111
+            name = "rare-imps"
+
+            async def history(self, *, limit):
+                self.history_limit = limit
+                for message in [Message(10), Message(11, pinned=True)]:
+                    yield message
+
+        channel = Channel()
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda channel_id: channel)
+        cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
+            manage_messages=True,
+            read_message_history=True,
+        )
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [1644]},
+            [],
+        )
+
+        self.assertEqual(deleted, [10])
+        self.assertEqual(channel.history_limit, module.FEED_CLEANUP_HISTORY_LIMIT)
+
+    async def test_process_cleans_feed_channel_but_keeps_active_and_pinned_messages(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        deleted = []
+
+        class Message:
+            def __init__(self, message_id, *, pinned=False):
+                self.id = message_id
+                self.pinned = pinned
+
+            async def delete(self):
+                deleted.append(self.id)
+
+        class Channel:
+            id = 111
+            name = "rare-imps"
+
+            async def history(self, *, limit):
+                self.history_limit = limit
+                for message in [
+                    Message(222),
+                    Message(333),
+                    Message(444, pinned=True),
+                ]:
+                    yield message
+
+        channel = Channel()
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda channel_id: channel)
+        cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
+            manage_messages=True,
+            read_message_history=True,
+        )
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.sighting_key: {"111": 222}}
+        }
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [1644]},
+            [spawn],
+        )
+
+        self.assertEqual(deleted, [333])
+        self.assertEqual(channel.history_limit, module.FEED_CLEANUP_HISTORY_LIMIT)
+
     async def test_map_render_records_download_and_image_timings(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
