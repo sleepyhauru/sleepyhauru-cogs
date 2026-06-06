@@ -34,8 +34,8 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   a map hyperlink, or an absolute discovered time.
 - Screenshot-enabled feed posts send the Discord message immediately, then edit
   that same message with the generated map attachment when rendering finishes.
-  Screenshot attachments show the current `16x16` OSRS area centered on the
-  sighting and place a matching impling icon on the reported game tile.
+  Screenshot attachments show the current `32x32` OSRS area centered on the
+  sighting and place a matching impling icon centered on the reported game tile.
 - Preserve migration support for previously stored exact dedupe keys and coarse
   area keys when changing sighting-state behavior.
 
@@ -67,9 +67,9 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   delete pinned messages, and do not scan channels outside configured
   ImplingFinder feed channels. The only exception is the one-time startup scrub,
   which may clean non-pinned messages that are not stored as active message IDs.
-- Map screenshots use an Explv zoom-10 crop, which corresponds to a `16x16`
-  game-tile area. The image is enlarged with nearest-neighbor scaling before
-  compositing the matching impling asset.
+- Map screenshots use an Explv zoom-10 crop, which corresponds to a `32x32`
+  game-tile area. The matching impling asset is composited at the center of the
+  final image.
 - Plain-text and generated-card fallbacks must also avoid exposing coordinates,
   NPC ID, age, or plane.
 - Keep bundled asset names aligned with `ImplingSpawn.type_key`:

@@ -28,7 +28,6 @@ from .core import (
     collapse_duplicate_sightings,
     explv_tiles_for_crop,
     filter_stale_spawns,
-    impling_icon_center,
     matching_channel_ids,
     npc_ids_for_types,
     parse_backend_payload,
@@ -54,7 +53,7 @@ MAP_LABELS_PATH = COG_DIR / "data" / "map_labels.json"
 IMPLING_ASSET_DIR = COG_DIR / "assets"
 MAP_IMAGE_SIZE = 512
 MAP_TILE_ZOOM = 10
-MAP_CROP_SIZE = 256
+MAP_CROP_SIZE = 512
 IMPLING_ICON_SIZE = 72
 MAP_RENDER_SEND_TIMEOUT_SECONDS = 2.0
 FEED_CLEANUP_HISTORY_LIMIT = 100
@@ -1326,10 +1325,8 @@ class ImplingFinder(commands.Cog):
             )
             return None
 
-        center_x, center_y = impling_icon_center(spawn, canvas_size=MAP_CROP_SIZE)
-        if MAP_CROP_SIZE != MAP_IMAGE_SIZE:
-            center_x = round(center_x * (MAP_IMAGE_SIZE / MAP_CROP_SIZE))
-            center_y = round(center_y * (MAP_IMAGE_SIZE / MAP_CROP_SIZE))
+        center_x = MAP_IMAGE_SIZE // 2
+        center_y = MAP_IMAGE_SIZE // 2
         icon_x = max(0, min(MAP_IMAGE_SIZE - icon.width, center_x - icon.width // 2))
         icon_y = max(0, min(MAP_IMAGE_SIZE - icon.height, center_y - icon.height // 2))
         image.alpha_composite(icon, (icon_x, icon_y))

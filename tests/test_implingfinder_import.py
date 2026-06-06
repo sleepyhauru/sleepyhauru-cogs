@@ -499,6 +499,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         fetch_urls = []
         new_calls = []
         resize_calls = []
+        composite_calls = []
 
         class FakeImage:
             def __init__(self, width=64, height=72):
@@ -518,6 +519,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
                 self.width, self.height = size
 
             def alpha_composite(self, _icon, _position):
+                composite_calls.append(_position)
                 return None
 
             def save(self, output, format):
@@ -553,10 +555,11 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         result = await cog._make_map_file(spawn)
 
         self.assertEqual(result.filename, "impling-map.png")
-        self.assertEqual(crop_calls, [(spawn, 256, 256, 10)])
+        self.assertEqual(crop_calls, [(spawn, 512, 512, 10)])
         self.assertEqual(fetch_urls, ["tile-a", "tile-b", "tile-c", "tile-d"])
-        self.assertEqual(new_calls, [("RGBA", (256, 256), (0, 0, 0, 0))])
-        self.assertEqual(resize_calls, [(512, 512)])
+        self.assertEqual(new_calls, [("RGBA", (512, 512), (0, 0, 0, 0))])
+        self.assertEqual(resize_calls, [])
+        self.assertEqual(composite_calls[-1], (220, 220))
         event = recorded[-1]
         self.assertEqual(event.kind, "render")
         self.assertEqual(event.impling_type, "dragon")
