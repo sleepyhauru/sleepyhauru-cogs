@@ -5,14 +5,19 @@ import implingfinder.core as core
 from implingfinder.core import (
     DEFAULT_ENDPOINT,
     ImplingSpawn,
+    MapLabel,
     build_map_url,
     build_id_endpoint,
     collapse_duplicate_sightings,
+    explv_chunk_tile,
     filter_stale_spawns,
+    impling_icon_center,
     matching_channel_ids,
     parse_backend_payload,
     parse_discovered_epoch,
     parse_impling_types,
+    region_id_from_xy,
+    resolve_location_name,
     select_unseen_spawns,
     sanitize_endpoint_url,
 )
@@ -37,7 +42,7 @@ class ImplingFinderCoreTest(unittest.TestCase):
 
         self.assertEqual(spawn.dedupe_key, "1644:489:3210:3420:0:1715000000")
 
-    def test_sighting_key_groups_nearby_moving_impling_rows(self):
+    def test_sighting_key_uses_official_osrs_region_id(self):
         first = ImplingSpawn(
             npcid=1642,
             world=324,
@@ -54,7 +59,7 @@ class ImplingFinderCoreTest(unittest.TestCase):
             plane=0,
             discovered=datetime.fromtimestamp(1_780_000_030, timezone.utc),
         )
-        crossed_bucket_boundary = ImplingSpawn(
+        adjacent_region = ImplingSpawn(
             npcid=1642,
             world=324,
             xcoord=1259,
@@ -71,8 +76,11 @@ class ImplingFinderCoreTest(unittest.TestCase):
             discovered=datetime.fromtimestamp(1_780_000_060, timezone.utc),
         )
 
+        self.assertEqual(region_id_from_xy(1289, 3158), 5169)
+        self.assertEqual(first.region_id, 5169)
+        self.assertEqual(first.sighting_key, "1642:324:0:5169")
         self.assertEqual(first.sighting_key, moved.sighting_key)
-        self.assertEqual(first.sighting_key, crossed_bucket_boundary.sighting_key)
+        self.assertNotEqual(first.sighting_key, adjacent_region.sighting_key)
         self.assertNotEqual(first.sighting_key, elsewhere.sighting_key)
 
     def test_collapse_duplicate_sightings_keeps_latest_row_per_region(self):
@@ -105,6 +113,54 @@ class ImplingFinderCoreTest(unittest.TestCase):
             collapse_duplicate_sightings([older, newer, separate]),
             [separate, newer],
         )
+
+    def test_resolve_location_name_prefers_same_region_then_nearest_label(self):
+        spawn = ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=3210,
+            ycoord=3420,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        labels = [
+            MapLabel("Varrock", 3211, 3450, 0),
+            MapLabel("Grand Exchange", 3164, 3487, 0),
+            MapLabel("Upstairs", 3210, 3420, 1),
+        ]
+
+        self.assertEqual(resolve_location_name(spawn, labels), "Varrock")
+
+        distant_spawn = ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=3000,
+            ycoord=3200,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        self.assertEqual(resolve_location_name(distant_spawn, labels), "Near Varrock")
+        self.assertEqual(resolve_location_name(distant_spawn, []), "Unknown area")
+
+    def test_explv_chunk_tile_and_icon_center_match_exact_game_tile(self):
+        spawn = ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+
+        tile = explv_chunk_tile(spawn)
+
+        self.assertEqual(tile.tile_x, 244)
+        self.assertEqual(tile.url_y, 263)
+        self.assertEqual(
+            tile.url,
+            "https://raw.githubusercontent.com/Explv/osrs_map_tiles/master/0/11/244/263.png",
+        )
+        self.assertEqual(impling_icon_center(spawn, canvas_size=512), (176, 288))
 
     def test_parse_backend_payload_reads_items_and_ignores_unknown_implings(self):
         payload = {

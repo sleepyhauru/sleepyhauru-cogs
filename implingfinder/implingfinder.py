@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import aiohttp
@@ -15,22 +17,23 @@ from redbot.core import Config, commands
 from .core import (
     DEFAULT_ENDPOINT,
     DEFAULT_ID_ENDPOINT,
-    DEFAULT_MAP_ZOOM,
     DEFAULT_MAX_AGE_SECONDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     IMPLING_ORDER,
     IMPLINGS,
+    MapLabel,
     MIN_POLL_INTERVAL_SECONDS,
     build_id_endpoint,
     build_map_url,
     collapse_duplicate_sightings,
-    explv_tiles_for_crop,
+    explv_chunk_tile,
     filter_stale_spawns,
-    format_age,
+    impling_icon_center,
     matching_channel_ids,
     npc_ids_for_types,
     parse_backend_payload,
     parse_impling_types,
+    resolve_location_name,
     sanitize_endpoint_url,
     select_unseen_spawns,
     sighting_key_from_legacy_dedupe_key,
@@ -44,8 +47,11 @@ REQUEST_TIMEOUT_SECONDS = 12
 MAX_BACKOFF_SECONDS = 300
 MANUAL_RECENT_MAX_COUNT = 25
 CONFIG_IDENTIFIER = 0x1A9D1F1644
-MAP_IMAGE_WIDTH = 760
-MAP_IMAGE_HEIGHT = 420
+COG_DIR = Path(__file__).resolve().parent
+MAP_LABELS_PATH = COG_DIR / "data" / "map_labels.json"
+IMPLING_ASSET_DIR = COG_DIR / "assets"
+MAP_IMAGE_SIZE = 512
+IMPLING_ICON_SIZE = 72
 
 
 class BackendError(Exception):
@@ -82,6 +88,7 @@ class ImplingFinder(commands.Cog):
         self._failure_counts: dict[int, int] = {}
         self._backoff_until: dict[int, float] = {}
         self._pillow_warning_logged = False
+        self._map_labels = self._load_map_labels()
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession(
@@ -189,8 +196,20 @@ class ImplingFinder(commands.Cog):
         now = datetime.now(timezone.utc)
         max_age = max(0, int(settings.get("max_age_seconds", DEFAULT_MAX_AGE_SECONDS)))
         current_sighting_keys = {spawn.sighting_key for spawn in spawns}
-        await self._delete_missing_active_messages(guild, current_sighting_keys)
-        await self._clear_missing_seen_sightings(guild, current_sighting_keys)
+        current_sighting_aliases: dict[str, str] = {}
+        for spawn in spawns:
+            current_sighting_aliases.setdefault(spawn.dedupe_key, spawn.sighting_key)
+            current_sighting_aliases.setdefault(spawn.legacy_area_key, spawn.sighting_key)
+        await self._delete_missing_active_messages(
+            guild,
+            current_sighting_keys,
+            current_sighting_aliases,
+        )
+        await self._clear_missing_seen_sightings(
+            guild,
+            current_sighting_keys,
+            current_sighting_aliases,
+        )
 
         fresh_spawns = filter_stale_spawns(spawns, now, max_age)
         unique_spawns = collapse_duplicate_sightings(fresh_spawns)
@@ -232,6 +251,7 @@ class ImplingFinder(commands.Cog):
         self,
         guild: discord.Guild,
         current_sighting_keys: set[str],
+        current_sighting_aliases: Mapping[str, str],
     ) -> None:
         guild_key = str(guild.id)
         async with self.config.active_messages() as active_messages:
@@ -242,7 +262,11 @@ class ImplingFinder(commands.Cog):
                 return
 
             for spawn_key, channel_messages in list(guild_messages.items()):
-                migrated_key = self._current_sighting_key(spawn_key, current_sighting_keys)
+                migrated_key = self._current_sighting_key(
+                    spawn_key,
+                    current_sighting_keys,
+                    current_sighting_aliases,
+                )
                 if migrated_key is not None and migrated_key != spawn_key:
                     if isinstance(channel_messages, dict):
                         migrated_messages = guild_messages.get(migrated_key)
@@ -274,6 +298,7 @@ class ImplingFinder(commands.Cog):
         self,
         guild: discord.Guild,
         current_sighting_keys: set[str],
+        current_sighting_aliases: Mapping[str, str],
     ) -> None:
         guild_key = str(guild.id)
         async with self.config.seen() as seen:
@@ -281,16 +306,27 @@ class ImplingFinder(commands.Cog):
             normalized_seen: list[str] = []
             normalized_set: set[str] = set()
             for key in current_seen:
-                current_key = self._current_sighting_key(str(key), current_sighting_keys)
+                current_key = self._current_sighting_key(
+                    str(key),
+                    current_sighting_keys,
+                    current_sighting_aliases,
+                )
                 if current_key is None or current_key in normalized_set:
                     continue
                 normalized_seen.append(current_key)
                 normalized_set.add(current_key)
             seen[guild_key] = normalized_seen
 
-    def _current_sighting_key(self, key: str, current_sighting_keys: set[str]) -> str | None:
+    def _current_sighting_key(
+        self,
+        key: str,
+        current_sighting_keys: set[str],
+        current_sighting_aliases: Mapping[str, str],
+    ) -> str | None:
         if key in current_sighting_keys:
             return key
+        if key in current_sighting_aliases:
+            return current_sighting_aliases[key]
         legacy_key = sighting_key_from_legacy_dedupe_key(key)
         if legacy_key in current_sighting_keys:
             return legacy_key
@@ -441,13 +477,37 @@ class ImplingFinder(commands.Cog):
         self._failure_counts.pop(guild_id, None)
         self._backoff_until.pop(guild_id, None)
 
+    def _load_map_labels(self) -> list[MapLabel]:
+        try:
+            raw_labels = json.loads(MAP_LABELS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            log.exception("Impling Finder could not load bundled Explv map labels")
+            return []
+
+        labels: list[MapLabel] = []
+        for item in raw_labels:
+            try:
+                labels.append(
+                    MapLabel(
+                        name=str(item["name"]),
+                        xcoord=int(item["x"]),
+                        ycoord=int(item["y"]),
+                        plane=int(item["plane"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return labels
+
+    def _location_for_spawn(self, spawn: ImplingSpawn) -> str:
+        return resolve_location_name(spawn, self._map_labels)
+
     def _embed_for_spawn(self, spawn: ImplingSpawn, *, now: Optional[datetime] = None) -> discord.Embed:
-        now = now or datetime.now(timezone.utc)
-        age_seconds = (now - spawn.discovered.astimezone(timezone.utc)).total_seconds()
         type_key = spawn.type_key or "dragon"
         info = IMPLINGS.get(type_key)
         color = info.color if info is not None else 0x5865F2
         map_url = build_map_url(spawn)
+        location = self._location_for_spawn(spawn)
 
         embed = discord.Embed(
             title=f"{spawn.impling_name} spotted",
@@ -456,24 +516,19 @@ class ImplingFinder(commands.Cog):
             timestamp=spawn.discovered.astimezone(timezone.utc),
         )
         embed.add_field(name="World", value=str(spawn.world), inline=True)
-        embed.add_field(name="Coordinates", value=f"{spawn.xcoord}, {spawn.ycoord}", inline=True)
-        embed.add_field(name="Plane", value=str(spawn.plane), inline=True)
-        embed.add_field(name="Age", value=format_age(age_seconds), inline=True)
+        embed.add_field(name="Location", value=location, inline=True)
         embed.add_field(
             name="Discovered",
             value=f"<t:{spawn.discovered_epoch}:F>\n<t:{spawn.discovered_epoch}:R>",
             inline=True,
         )
-        embed.add_field(name="NPC ID", value=str(spawn.npcid), inline=True)
         embed.add_field(name="Map", value=f"[Open Explv map]({map_url})", inline=False)
-        embed.set_footer(text="Read-only data from the Impling Finder ORDS backend")
         return embed
 
     def _content_for_spawn(self, spawn: ImplingSpawn) -> str:
         return (
             f"{spawn.impling_name} spotted on world {spawn.world} at "
-            f"{spawn.xcoord}, {spawn.ycoord}, plane {spawn.plane}. "
-            f"Map: {build_map_url(spawn)}"
+            f"{self._location_for_spawn(spawn)}."
         )
 
     async def _send_spawn_to_channel(
@@ -564,27 +619,28 @@ class ImplingFinder(commands.Cog):
         pillow = self._load_pillow()
         if pillow is None:
             return None
-        Image, ImageDraw, _ImageFont = pillow
+        Image, _ImageDraw, _ImageFont = pillow
 
-        tiles = explv_tiles_for_crop(
-            spawn,
-            width=MAP_IMAGE_WIDTH,
-            height=MAP_IMAGE_HEIGHT,
-            zoom=DEFAULT_MAP_ZOOM,
-        )
+        tile = explv_chunk_tile(spawn)
         try:
-            tile_payloads = await asyncio.gather(
-                *(self._fetch_map_tile(tile.url) for tile in tiles)
+            tile_payload = await self._fetch_map_tile(tile.url)
+            image = Image.open(io.BytesIO(tile_payload)).convert("RGBA").resize(
+                (MAP_IMAGE_SIZE, MAP_IMAGE_SIZE),
+                Image.Resampling.NEAREST,
             )
-            image = Image.new("RGB", (MAP_IMAGE_WIDTH, MAP_IMAGE_HEIGHT), (18, 20, 24))
-            for tile, payload in zip(tiles, tile_payloads):
-                tile_image = Image.open(io.BytesIO(payload)).convert("RGB")
-                image.paste(tile_image, (tile.paste_x, tile.paste_y))
+            icon = Image.open(IMPLING_ASSET_DIR / f"{spawn.type_key}.png").convert("RGBA")
+            icon.thumbnail(
+                (IMPLING_ICON_SIZE, IMPLING_ICON_SIZE),
+                Image.Resampling.LANCZOS,
+            )
         except (MapTileError, OSError, ValueError) as exc:
             log.warning("Impling Finder could not build Explv map crop: %s", exc)
             return None
 
-        self._draw_map_overlay(image, spawn, ImageDraw)
+        center_x, center_y = impling_icon_center(spawn, canvas_size=MAP_IMAGE_SIZE)
+        icon_x = max(0, min(MAP_IMAGE_SIZE - icon.width, center_x - icon.width // 2))
+        icon_y = max(0, min(MAP_IMAGE_SIZE - icon.height, center_y - icon.height // 2))
+        image.alpha_composite(icon, (icon_x, icon_y))
 
         output = io.BytesIO()
         image.save(output, format="PNG")
@@ -602,45 +658,6 @@ class ImplingFinder(commands.Cog):
             raise MapTileError(f"map tile request failed: {exc}") from exc
         except asyncio.TimeoutError as exc:
             raise MapTileError("map tile request timed out") from exc
-
-    def _draw_map_overlay(self, image, spawn: ImplingSpawn, ImageDraw) -> None:
-        draw = ImageDraw.Draw(image, "RGBA")
-        width, height = image.size
-        center_x = width // 2
-        center_y = height // 2
-        type_key = spawn.type_key or "dragon"
-        color = IMPLINGS.get(type_key, IMPLINGS["dragon"]).color
-        accent = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
-
-        draw.rectangle((0, 0, width, 74), fill=(12, 14, 17, 218))
-        draw.rectangle((0, 72, width, 76), fill=(*accent, 235))
-
-        title_font = self._load_font(31, bold=True)
-        body_font = self._load_font(21)
-        draw.text((18, 11), spawn.impling_name, fill=(248, 249, 252, 255), font=title_font)
-        draw.text(
-            (20, 47),
-            f"World {spawn.world} | {spawn.xcoord}, {spawn.ycoord}, plane {spawn.plane}",
-            fill=(220, 225, 232, 255),
-            font=body_font,
-        )
-
-        draw.ellipse(
-            (center_x - 14, center_y - 14, center_x + 14, center_y + 14),
-            outline=(255, 255, 255, 245),
-            width=4,
-        )
-        draw.ellipse(
-            (center_x - 8, center_y - 8, center_x + 8, center_y + 8),
-            fill=(*accent, 235),
-            outline=(15, 18, 22, 240),
-            width=2,
-        )
-        marker_line = (255, 255, 255, 230)
-        draw.line((center_x - 30, center_y, center_x - 17, center_y), fill=marker_line, width=3)
-        draw.line((center_x + 17, center_y, center_x + 30, center_y), fill=marker_line, width=3)
-        draw.line((center_x, center_y - 30, center_x, center_y - 17), fill=marker_line, width=3)
-        draw.line((center_x, center_y + 17, center_x, center_y + 30), fill=marker_line, width=3)
 
     def _load_pillow(self):
         try:
@@ -684,26 +701,22 @@ class ImplingFinder(commands.Cog):
         type_key = spawn.type_key or "dragon"
         color = IMPLINGS.get(type_key, IMPLINGS["dragon"]).color
         accent = ((color >> 16) & 255, (color >> 8) & 255, color & 255)
-        image = Image.new("RGB", (760, 300), (28, 31, 35))
+        image = Image.new("RGB", (760, 260), (28, 31, 35))
         draw = ImageDraw.Draw(image)
-        draw.rectangle((0, 0, 760, 300), fill=(28, 31, 35))
-        draw.rectangle((0, 0, 18, 300), fill=accent)
-        draw.rectangle((40, 40, 720, 260), outline=(68, 74, 82), width=2)
+        draw.rectangle((0, 0, 760, 260), fill=(28, 31, 35))
+        draw.rectangle((0, 0, 18, 260), fill=accent)
+        draw.rectangle((40, 40, 720, 220), outline=(68, 74, 82), width=2)
 
         title_font = self._load_font(46, bold=True)
         label_font = self._load_font(24, bold=True)
-        body_font = self._load_font(30)
-        small_font = self._load_font(22)
-        discovered = spawn.discovered.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        body_font = self._load_font(24)
+        location = self._location_for_spawn(spawn)
 
         draw.text((56, 54), spawn.impling_name, fill=(245, 246, 250), font=title_font)
         draw.text((58, 134), "World", fill=accent, font=label_font)
         draw.text((58, 166), str(spawn.world), fill=(245, 246, 250), font=body_font)
-        draw.text((210, 134), "Coords", fill=accent, font=label_font)
-        draw.text((210, 166), f"{spawn.xcoord}, {spawn.ycoord}", fill=(245, 246, 250), font=body_font)
-        draw.text((430, 134), "Plane", fill=accent, font=label_font)
-        draw.text((430, 166), str(spawn.plane), fill=(245, 246, 250), font=body_font)
-        draw.text((58, 224), discovered, fill=(205, 210, 218), font=small_font)
+        draw.text((210, 134), "Location", fill=accent, font=label_font)
+        draw.text((210, 166), location, fill=(245, 246, 250), font=body_font)
 
         output = io.BytesIO()
         image.save(output, format="PNG")

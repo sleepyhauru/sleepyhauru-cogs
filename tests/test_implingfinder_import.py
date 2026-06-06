@@ -58,6 +58,32 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["embed"].image, "attachment://impling-map.png")
         self.assertIs(sent_message, message)
 
+    async def test_embed_uses_human_location_and_omits_internal_spawn_fields(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=3210,
+            ycoord=3420,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        cog._location_for_spawn = lambda _spawn: "Varrock"
+
+        embed = cog._embed_for_spawn(spawn)
+
+        self.assertEqual(
+            [field.name for field in embed.fields],
+            ["World", "Location", "Discovered", "Map"],
+        )
+        self.assertEqual(embed.fields[1].value, "Varrock")
+        self.assertIsNone(embed.footer)
+        content = cog._content_for_spawn(spawn)
+        self.assertIn("Varrock", content)
+        self.assertNotIn("3210", content)
+        self.assertNotIn("plane", content.lower())
+
     async def test_process_deletes_tracked_message_when_spawn_disappears(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -133,6 +159,34 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(deleted, [])
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {spawn.sighting_key: {"111": 222}}},
+        )
+
+    async def test_process_migrates_deployed_coarse_area_key_for_current_sighting(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: object())
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.legacy_area_key: {"111": 222}}
+        }
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [1644]},
+            [spawn],
+        )
+
         self.assertEqual(
             cog.config._global_store["active_messages"],
             {"123": {spawn.sighting_key: {"111": 222}}},

@@ -78,15 +78,21 @@ Type aliases:
 
 The backend does not provide real RuneLite screenshots. It only provides NPC ID, world, coordinates, plane, and discovered time.
 
-If Pillow is installed and `[p]implingset screenshots true` is enabled, this cog attaches a generated Explv world-map crop centered on the sighting. The map image uses the same OSRS coordinates as the linked Explv map.
+If `[p]implingset screenshots true` is enabled, this cog attaches the exact `8x8` OSRS chunk containing the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane.
 
-If the map tiles cannot be downloaded, the cog falls back to the older generated coordinate card. Neither attachment is a real in-game RuneLite screenshot. A future RuneLite companion plugin would be needed for real screenshot uploads.
+If the map tile cannot be downloaded, the cog falls back to a generated card containing only the impling name, world, and location. Neither attachment is a real in-game RuneLite screenshot. A future RuneLite companion plugin would be needed for real screenshot uploads.
 
-Pillow is optional and is not listed as a required dependency.
+Pillow is installed as a cog dependency.
 
 ## Duplicate and Despawn Handling
 
-Each sighting is deduplicated by NPC ID, world, plane, and coarse map area. The backend can report the same moving impling several times with slightly different coordinates or timestamps, so the cog keeps the newest row for each area and avoids posting the older nearby rows as duplicates.
+Each sighting is deduplicated by NPC ID, world, plane, and the official OSRS region ID:
+
+```text
+((x >> 6) << 8) | (y >> 6)
+```
+
+The backend can report the same moving impling several times with slightly different coordinates or timestamps, so the cog keeps the newest row for each region and avoids posting older rows from that region as duplicates.
 
 When a tracked sighting disappears from the latest successful backend response, the cog deletes the Discord message it posted for that sighting and removes the stored message ID. Messages are kept for retry if Discord rejects the delete because of permissions or a transient API error.
 
@@ -95,3 +101,9 @@ For competitive hunting, set the interval to the minimum:
 ```text
 [p]implingset interval 10
 ```
+
+## Location and Asset Sources
+
+Discord posts display a human-readable location resolved from bundled [Explv map labels](https://github.com/Explv/Explv.github.io/blob/master/public/resources/map_labels.json). A label in the same region and plane is preferred; otherwise the nearest label is displayed with a `Near` prefix. If no label is available, the location is shown as `Unknown area`.
+
+The chunk background uses [Explv OSRS map tiles](https://github.com/Explv/osrs_map_tiles). Matching transparent impling images are bundled from the [Old School RuneScape Wiki](https://oldschool.runescape.wiki/).

@@ -18,7 +18,6 @@ MIN_POLL_INTERVAL_SECONDS = 10
 DEFAULT_POLL_INTERVAL_SECONDS = 30
 DEFAULT_MAX_AGE_SECONDS = 15 * 60
 DEFAULT_MAP_ZOOM = 7
-SIGHTING_REGION_SIZE = 128
 EXPLV_TILE_BASE_URL = "https://raw.githubusercontent.com/Explv/osrs_map_tiles/master"
 EXPLV_MIN_ZOOM = 4
 EXPLV_MAX_ZOOM = 11
@@ -35,6 +34,18 @@ class ImplingInfo:
     name: str
     npcid: int
     color: int
+
+
+@dataclass(frozen=True)
+class MapLabel:
+    name: str
+    xcoord: int
+    ycoord: int
+    plane: int
+
+    @property
+    def region_id(self) -> int:
+        return region_id_from_xy(self.xcoord, self.ycoord)
 
 
 IMPLINGS: dict[str, ImplingInfo] = {
@@ -79,9 +90,17 @@ class ImplingSpawn:
         return f"{self.npcid}:{self.world}:{self.xcoord}:{self.ycoord}:{self.plane}:{epoch}"
 
     @property
+    def region_id(self) -> int:
+        return region_id_from_xy(self.xcoord, self.ycoord)
+
+    @property
     def sighting_key(self) -> str:
-        region_x = sighting_region(self.xcoord)
-        region_y = sighting_region(self.ycoord)
+        return f"{self.npcid}:{self.world}:{self.plane}:{self.region_id}"
+
+    @property
+    def legacy_area_key(self) -> str:
+        region_x = (self.xcoord + 64) // 128
+        region_y = (self.ycoord + 64) // 128
         return f"{self.npcid}:{self.world}:{self.plane}:{region_x}:{region_y}"
 
     @property
@@ -118,8 +137,8 @@ def parse_discovered_epoch(value: Any) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc)
 
 
-def sighting_region(coord: int) -> int:
-    return (int(coord) + SIGHTING_REGION_SIZE // 2) // SIGHTING_REGION_SIZE
+def region_id_from_xy(xcoord: int, ycoord: int) -> int:
+    return ((int(xcoord) >> 6) << 8) | (int(ycoord) >> 6)
 
 
 def parse_impling_types(values: Sequence[str] | Iterable[str]) -> list[str]:
@@ -211,6 +230,20 @@ def collapse_duplicate_sightings(spawns: Iterable[ImplingSpawn]) -> list[Impling
     )
 
 
+def resolve_location_name(spawn: ImplingSpawn, labels: Iterable[MapLabel]) -> str:
+    same_plane = [label for label in labels if label.plane == spawn.plane]
+    if not same_plane:
+        return "Unknown area"
+
+    def distance_squared(label: MapLabel) -> int:
+        return (label.xcoord - spawn.xcoord) ** 2 + (label.ycoord - spawn.ycoord) ** 2
+
+    same_region = [label for label in same_plane if label.region_id == spawn.region_id]
+    if same_region:
+        return min(same_region, key=distance_squared).name
+    return f"Near {min(same_plane, key=distance_squared).name}"
+
+
 def matching_channel_ids(channels: Mapping[str, Sequence[int]], spawn: ImplingSpawn) -> list[int]:
     channel_ids: list[int] = []
     for raw_channel_id, npc_ids in channels.items():
@@ -259,9 +292,7 @@ def sighting_key_from_legacy_dedupe_key(value: str) -> str | None:
         plane = int(parts[4])
     except ValueError:
         return None
-    region_x = sighting_region(xcoord)
-    region_y = sighting_region(ycoord)
-    return f"{npcid}:{world}:{plane}:{region_x}:{region_y}"
+    return f"{npcid}:{world}:{plane}:{region_id_from_xy(xcoord, ycoord)}"
 
 
 def build_map_url(spawn: ImplingSpawn, *, zoom: int = DEFAULT_MAP_ZOOM) -> str:
@@ -344,6 +375,30 @@ def explv_tiles_for_crop(
                 )
             )
     return tiles
+
+
+def explv_chunk_tile(spawn: ImplingSpawn) -> ExplvTile:
+    pixel_x, pixel_y = explv_pixel_point(spawn.xcoord, spawn.ycoord, zoom=EXPLV_MAX_ZOOM)
+    tile_x = math.floor(pixel_x / EXPLV_TILE_SIZE)
+    tile_y = math.floor(pixel_y / EXPLV_TILE_SIZE)
+    url, url_y = explv_tile_url(spawn.plane, EXPLV_MAX_ZOOM, tile_x, tile_y)
+    return ExplvTile(
+        tile_x=tile_x,
+        tile_y=tile_y,
+        url_y=url_y,
+        paste_x=0,
+        paste_y=0,
+        url=url,
+    )
+
+
+def impling_icon_center(spawn: ImplingSpawn, *, canvas_size: int = EXPLV_TILE_SIZE) -> tuple[int, int]:
+    pixel_x, pixel_y = explv_pixel_point(spawn.xcoord, spawn.ycoord, zoom=EXPLV_MAX_ZOOM)
+    scale = int(canvas_size) / EXPLV_TILE_SIZE
+    return (
+        round((pixel_x % EXPLV_TILE_SIZE) * scale),
+        round((pixel_y % EXPLV_TILE_SIZE) * scale),
+    )
 
 
 def sanitize_endpoint_url(value: str) -> str:

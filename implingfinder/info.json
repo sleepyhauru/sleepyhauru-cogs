@@ -7,7 +7,7 @@
     "disabled": false,
     "install_msg": "Load it with `[p]load implingfinder`. Configure a feed with `[p]implingset addchannel #dragon-imps dragon lucky`, then enable polling with `[p]implingset enable`.",
     "required_cogs": {},
-    "requirements": [],
+    "requirements": ["pillow"],
     "short": "Post recent OSRS rare impling sightings.",
     "end_user_data_statement": "This cog stores per-guild feed settings and recent impling spawn dedupe keys. It does not store user data.",
     "tags": ["osrs", "runelite", "impling", "hunter", "feed"],
