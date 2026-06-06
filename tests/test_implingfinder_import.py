@@ -93,6 +93,48 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(starts), 2)
         self.assertLess(starts[1] - starts[0], 0.105)
 
+    async def test_poll_loop_does_not_schedule_under_interval_after_late_wake(self):
+        module = load_module("implingfinder.implingfinder")
+        original_interval = module.MIN_POLL_INTERVAL_SECONDS
+        original_monotonic = module.time.monotonic
+        original_sleep = module.asyncio.sleep
+        module.MIN_POLL_INTERVAL_SECONDS = 0.05
+        clock = {"now": 0.0}
+        sleep_extras = [0.004, 0.0]
+        starts = []
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+
+        def monotonic():
+            return clock["now"]
+
+        async def sleep(delay):
+            extra = sleep_extras.pop(0) if sleep_extras else 0.0
+            clock["now"] += max(0.0, delay) + extra
+
+        async def wait_until_ready():
+            return None
+
+        async def poll_enabled_guilds():
+            starts.append(clock["now"])
+            if len(starts) == 3:
+                raise asyncio.CancelledError()
+
+        cog._wait_until_ready = wait_until_ready
+        cog._poll_enabled_guilds = poll_enabled_guilds
+
+        try:
+            module.time.monotonic = monotonic
+            module.asyncio.sleep = sleep
+            with self.assertRaises(asyncio.CancelledError):
+                await cog._poll_loop()
+        finally:
+            module.MIN_POLL_INTERVAL_SECONDS = original_interval
+            module.time.monotonic = original_monotonic
+            module.asyncio.sleep = original_sleep
+
+        self.assertEqual(len(starts), 3)
+        self.assertGreaterEqual(starts[2] - starts[1], 0.05)
+
     async def test_spawn_posts_immediately_then_edits_generated_map_attachment(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
