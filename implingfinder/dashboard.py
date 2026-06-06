@@ -389,11 +389,15 @@ function metric(label, value, detail="") {
 }
 function renderSummary(data) {
   const totals = data.totals || {}; const latency = data.latency_ms || {};
+  const botAfterFetch = latency.end_to_end?.average == null || latency.age_at_fetch?.average == null
+    ? null
+    : Math.max(0, latency.end_to_end.average - latency.age_at_fetch.average);
   $("metrics").innerHTML = [
     metric("Fetches", count(totals.fetches), `${count(totals.errors)} errors`),
     metric("Posts sent", count(totals.posts), `${count(totals.routed)} routed`),
     metric("Fetch average", ms(latency.fetch?.average), `max ${ms(latency.fetch?.maximum)}`),
     metric("Age at fetch", ms(latency.age_at_fetch?.average), `max ${ms(latency.age_at_fetch?.maximum)}`),
+    metric("Bot after fetch", ms(botAfterFetch), "avg post gap"),
     metric("Render average", ms(latency.render?.average), `max ${ms(latency.render?.maximum)}`),
     metric("Discord send", ms(latency.send?.average), `max ${ms(latency.send?.maximum)}`),
     metric("Discovery to post", ms(latency.end_to_end?.average), `max ${ms(latency.end_to_end?.maximum)}`)

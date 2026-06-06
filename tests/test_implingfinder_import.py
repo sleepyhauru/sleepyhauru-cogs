@@ -64,6 +64,35 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
     async def _never_started(self):
         await __import__("asyncio").sleep(3600)
 
+    async def test_poll_loop_uses_fixed_start_cadence_after_slow_poll(self):
+        module = load_module("implingfinder.implingfinder")
+        original_interval = module.MIN_POLL_INTERVAL_SECONDS
+        module.MIN_POLL_INTERVAL_SECONDS = 0.05
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        starts = []
+
+        async def wait_until_ready():
+            return None
+
+        async def poll_enabled_guilds():
+            starts.append(asyncio.get_running_loop().time())
+            if len(starts) == 1:
+                await asyncio.sleep(0.07)
+                return
+            raise asyncio.CancelledError()
+
+        cog._wait_until_ready = wait_until_ready
+        cog._poll_enabled_guilds = poll_enabled_guilds
+
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await cog._poll_loop()
+        finally:
+            module.MIN_POLL_INTERVAL_SECONDS = original_interval
+
+        self.assertEqual(len(starts), 2)
+        self.assertLess(starts[1] - starts[0], 0.105)
+
     async def test_spawn_posts_immediately_then_edits_generated_map_attachment(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))

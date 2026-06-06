@@ -108,6 +108,10 @@ For competitive hunting, set the interval to the minimum:
 [p]implingset interval 5
 ```
 
+The interval is a fixed-start cadence, so the cog does not sleep an extra 5
+seconds after a slow backend fetch. If a backend read takes longer than the
+configured interval, the next poll starts as soon as the previous poll finishes.
+
 ## Location and Asset Sources
 
 Discord posts display a human-readable location resolved from bundled [Explv map labels](https://github.com/Explv/Explv.github.io/blob/master/public/resources/map_labels.json). A label in the same region and plane is preferred; otherwise the nearest label is displayed with a `Near` prefix. If no label is available, the location is shown as `Unknown area`.
@@ -122,8 +126,9 @@ the dashboard does not implement its own authentication.
 
 The dashboard tracks backend fetches, poll processing, duplicate suppression,
 routed sightings, map download/render work, Discord posting, screenshot attachment
-edits, age-at-fetch latency, discovery-to-post latency, despawn edits, feed cleanup, errors, active backend backoffs, event-loop lag,
-memory use, queue health, and database size.
+edits, age-at-fetch latency, bot-after-fetch posting gap, discovery-to-post
+latency, despawn edits, feed cleanup, errors, active backend backoffs, event-loop
+lag, memory use, queue health, and database size.
 
 Metrics are written through a bounded non-blocking queue so dashboard storage
 cannot delay a sighting post. Individual events are retained for 7 days and

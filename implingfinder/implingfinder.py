@@ -245,6 +245,7 @@ class ImplingFinder(commands.Cog):
 
     async def _poll_loop(self) -> None:
         await self._wait_until_ready()
+        next_poll_at = time.monotonic()
         while True:
             try:
                 await self._poll_enabled_guilds()
@@ -252,7 +253,12 @@ class ImplingFinder(commands.Cog):
                 raise
             except Exception:
                 log.exception("Impling Finder polling loop hit an unexpected error")
-            await asyncio.sleep(MIN_POLL_INTERVAL_SECONDS)
+            next_poll_at += MIN_POLL_INTERVAL_SECONDS
+            now = time.monotonic()
+            if next_poll_at <= now:
+                next_poll_at = now
+                continue
+            await asyncio.sleep(next_poll_at - now)
 
     async def _poll_enabled_guilds(self) -> None:
         now_monotonic = time.monotonic()

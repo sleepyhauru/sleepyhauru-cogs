@@ -9,7 +9,11 @@ class FakeMetricsStore:
     async def summary(self, *, hours, guild_id=None, now=None):
         return {
             "totals": {"fetches": 10, "posts": 2, "errors": 1, "despawns": 1},
-            "latency_ms": {"fetch": {"average": 42.0, "maximum": 90.0}},
+            "latency_ms": {
+                "fetch": {"average": 42.0, "maximum": 90.0},
+                "age_at_fetch": {"average": 20_000.0, "maximum": 30_000.0},
+                "end_to_end": {"average": 20_300.0, "maximum": 30_600.0},
+            },
         }
 
     async def hourly(self, *, hours, guild_id=None, now=None):
@@ -58,6 +62,8 @@ class ImplingFinderDashboardTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertIn("ImplingFinder Performance", response.text)
         self.assertIn("Pipeline latency", response.text)
+        self.assertIn("Age at fetch", response.text)
+        self.assertIn("Bot after fetch", response.text)
         self.assertIn("Recent events", response.text)
         self.assertNotIn("<form", response.text.lower())
         self.assertEqual(response.headers["Content-Security-Policy"].split(";")[0], "default-src 'self'")
