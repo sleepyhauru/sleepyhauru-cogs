@@ -45,7 +45,7 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 
 ## Important Implementation Details
 
-- The minimum polling interval is `10` seconds; default is `30`.
+- The minimum polling interval is `5` seconds; default is `5`.
 - Location resolution prefers the nearest same-plane label in the same official
   region, then `Near <nearest same-plane label>`, then `Unknown area`.
 - Region-based sighting keys deliberately allow a moving impling to update

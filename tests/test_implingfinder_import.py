@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 import io
 import types
@@ -11,7 +12,9 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=object())
 
-        self.assertEqual(cog.config._guild_defaults["poll_interval"], 30)
+        self.assertEqual(module.MIN_POLL_INTERVAL_SECONDS, 5)
+        self.assertEqual(module.DEFAULT_POLL_INTERVAL_SECONDS, 5)
+        self.assertEqual(cog.config._guild_defaults["poll_interval"], 5)
         self.assertEqual(cog.config._guild_defaults["max_age_seconds"], 900)
         self.assertEqual(cog.config._global_store["seen"], {})
         self.assertEqual(cog.config._global_store["active_messages"], {})
@@ -214,6 +217,22 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         return result
 
+    async def test_interval_command_accepts_five_second_minimum(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+
+        await cog.implingset_interval(ctx, 5)
+
+        self.assertEqual(await cog.config.guild(guild).poll_interval(), 5)
+        self.assertEqual(replies, ["Polling interval set to `5s`."])
+
     async def test_embed_uses_human_location_and_omits_internal_spawn_fields(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -298,15 +317,21 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             plane=0,
             discovered=datetime.now(timezone.utc),
         )
+        crop_calls = []
+        fetch_urls = []
+        new_calls = []
+        resize_calls = []
 
         class FakeImage:
-            width = 64
-            height = 72
+            def __init__(self, width=64, height=72):
+                self.width = width
+                self.height = height
 
             def convert(self, _mode):
                 return self
 
             def resize(self, _size, _resampling):
+                resize_calls.append(_size)
                 self.width = 512
                 self.height = 512
                 return self
@@ -320,22 +345,102 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             def save(self, output, format):
                 output.write(b"png")
 
+        def fake_new(mode, size, color):
+            new_calls.append((mode, size, color))
+            return FakeImage(*size)
+
         fake_image_module = types.SimpleNamespace(
             Resampling=types.SimpleNamespace(NEAREST=1, LANCZOS=2),
             open=lambda _source: FakeImage(),
+            new=fake_new,
         )
+
+        def fake_tiles_for_crop(received_spawn, *, width, height, zoom=None):
+            crop_calls.append((received_spawn, width, height, zoom))
+            return [
+                types.SimpleNamespace(url="tile-a", paste_x=0, paste_y=0),
+                types.SimpleNamespace(url="tile-b", paste_x=128, paste_y=0),
+                types.SimpleNamespace(url="tile-c", paste_x=0, paste_y=128),
+                types.SimpleNamespace(url="tile-d", paste_x=128, paste_y=128),
+            ]
+
+        async def fetch_map_tile(url):
+            fetch_urls.append(url)
+            return b"tile"
+
+        module.explv_tiles_for_crop = fake_tiles_for_crop
         cog._load_pillow = lambda: (fake_image_module, None, None)
-        cog._fetch_map_tile = self._async_return(b"tile")
+        cog._fetch_map_tile = fetch_map_tile
 
         result = await cog._make_map_file(spawn)
 
         self.assertEqual(result.filename, "impling-map.png")
+        self.assertEqual(crop_calls, [(spawn, 256, 256, 10)])
+        self.assertEqual(fetch_urls, ["tile-a", "tile-b", "tile-c", "tile-d"])
+        self.assertEqual(new_calls, [("RGBA", (256, 256), (0, 0, 0, 0))])
+        self.assertEqual(resize_calls, [(512, 512)])
         event = recorded[-1]
         self.assertEqual(event.kind, "render")
         self.assertEqual(event.impling_type, "dragon")
         self.assertEqual(event.outcome, "ok")
         self.assertIsNotNone(event.fetch_ms)
         self.assertIsNotNone(event.render_ms)
+
+    async def test_slow_screenshot_render_does_not_block_spawn_post(self):
+        module = load_module("implingfinder.implingfinder")
+        module.MAP_RENDER_SEND_TIMEOUT_SECONDS = 0.01
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        recorded = []
+        cog.metrics_store = types.SimpleNamespace(record=lambda event: recorded.append(event))
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", me=None)
+        sent_messages = []
+        message = types.SimpleNamespace(id=999)
+
+        class Channel:
+            id = 456
+            name = "rare-imps"
+
+            async def send(self, *args, **kwargs):
+                sent_messages.append((args, kwargs))
+                return message
+
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+
+        async def slow_screenshot_file(_spawn):
+            await asyncio.sleep(3600)
+
+        cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+        )
+        cog._make_screenshot_file = slow_screenshot_file
+
+        with self.assertLogs("red.implingfinder", level="WARNING"):
+            sent_message = await asyncio.wait_for(
+                cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
+                timeout=0.25,
+            )
+
+        self.assertIs(sent_message, message)
+        self.assertEqual(len(sent_messages), 1)
+        _args, kwargs = sent_messages[0]
+        self.assertNotIn("file", kwargs)
+        self.assertIsNone(kwargs["embed"].image)
+        self.assertTrue(
+            any(event.kind == "render" and event.outcome == "timeout" for event in recorded)
+        )
+        post_event = recorded[-1]
+        self.assertEqual(post_event.kind, "post")
+        self.assertEqual(post_event.outcome, "ok")
+        self.assertIsNotNone(post_event.render_ms)
 
     async def test_process_migrates_legacy_active_message_key_for_current_sighting(self):
         module = load_module("implingfinder.implingfinder")

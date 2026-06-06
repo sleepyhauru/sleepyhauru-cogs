@@ -54,7 +54,7 @@ Enable polling:
 
 - `[p]implingset enable`
 - `[p]implingset disable`
-- `[p]implingset interval <seconds>` - minimum `10`, default `30`
+- `[p]implingset interval <seconds>` - minimum `5`, default `5`
 - `[p]implingset maxage <seconds>` - default `900`
 - `[p]implingset addchannel <#channel> <types...>`
 - `[p]implingset removechannel <#channel>`
@@ -78,7 +78,7 @@ Type aliases:
 
 The backend does not provide real RuneLite screenshots. It only provides NPC ID, world, coordinates, plane, and discovered time.
 
-If `[p]implingset screenshots true` is enabled, this cog attaches a `16x16` OSRS area centered on the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane.
+If `[p]implingset screenshots true` is enabled, this cog attaches a `16x16` OSRS area centered on the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane. If the map cannot be rendered quickly, the Discord post is sent without waiting for the attachment.
 
 If the map tile cannot be downloaded, the cog falls back to a generated card containing only the impling name, world, and location. Neither attachment is a real in-game RuneLite screenshot. A future RuneLite companion plugin would be needed for real screenshot uploads.
 
@@ -99,7 +99,7 @@ When a tracked sighting disappears from the latest successful backend response, 
 For competitive hunting, set the interval to the minimum:
 
 ```text
-[p]implingset interval 10
+[p]implingset interval 5
 ```
 
 ## Location and Asset Sources

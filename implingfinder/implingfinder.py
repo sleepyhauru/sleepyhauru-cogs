@@ -54,8 +54,10 @@ COG_DIR = Path(__file__).resolve().parent
 MAP_LABELS_PATH = COG_DIR / "data" / "map_labels.json"
 IMPLING_ASSET_DIR = COG_DIR / "assets"
 MAP_IMAGE_SIZE = 512
-MAP_CROP_SIZE = 512
+MAP_TILE_ZOOM = 10
+MAP_CROP_SIZE = 256
 IMPLING_ICON_SIZE = 72
+MAP_RENDER_SEND_TIMEOUT_SECONDS = 2.0
 
 
 class BackendError(Exception):
@@ -737,9 +739,7 @@ class ImplingFinder(commands.Cog):
             file = None
             if screenshots:
                 if can_attach:
-                    render_started = time.monotonic()
-                    file = await self._make_screenshot_file(spawn)
-                    render_ms = (time.monotonic() - render_started) * 1000
+                    file, render_ms = await self._make_screenshot_file_for_send(spawn)
                     if file is not None:
                         embed.set_image(url=f"attachment://{file.filename}")
                 else:
@@ -860,6 +860,40 @@ class ImplingFinder(commands.Cog):
             return None
         return channel.permissions_for(member)
 
+    async def _make_screenshot_file_for_send(
+        self,
+        spawn: ImplingSpawn,
+    ) -> tuple[Optional[discord.File], Optional[float]]:
+        render_started = time.monotonic()
+        try:
+            file = await asyncio.wait_for(
+                self._make_screenshot_file(spawn),
+                timeout=MAP_RENDER_SEND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            render_ms = (time.monotonic() - render_started) * 1000
+            log.warning(
+                "Impling Finder map render timed out after %.2fs; sending without attachment",
+                MAP_RENDER_SEND_TIMEOUT_SECONDS,
+            )
+            self._record_render_timeout_metric(spawn, render_ms)
+            return None, render_ms
+        return file, (time.monotonic() - render_started) * 1000
+
+    def _record_render_timeout_metric(self, spawn: ImplingSpawn, render_ms: float) -> None:
+        self._record_metric(
+            MetricEvent(
+                kind="render",
+                outcome="timeout",
+                impling_type=spawn.type_key,
+                world=spawn.world,
+                location=self._location_for_spawn(spawn),
+                duration_ms=render_ms,
+                render_ms=render_ms,
+                error_category="timeout",
+            )
+        )
+
     async def _make_screenshot_file(self, spawn: ImplingSpawn) -> Optional[discord.File]:
         map_file = await self._make_map_file(spawn)
         if map_file is not None:
@@ -880,6 +914,7 @@ class ImplingFinder(commands.Cog):
                 spawn,
                 width=MAP_CROP_SIZE,
                 height=MAP_CROP_SIZE,
+                zoom=MAP_TILE_ZOOM,
             )
             tile_payloads = await asyncio.gather(
                 *(self._fetch_map_tile(tile.url) for tile in tiles)
@@ -1095,7 +1130,7 @@ class ImplingFinder(commands.Cog):
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def implingset_interval(self, ctx: commands.Context, seconds: int) -> None:
-        """Set the polling interval in seconds. Minimum: 10 seconds."""
+        """Set the polling interval in seconds. Minimum: 5 seconds."""
         if seconds < MIN_POLL_INTERVAL_SECONDS:
             await ctx.send(f"Polling interval must be at least {MIN_POLL_INTERVAL_SECONDS} seconds.")
             return
@@ -1250,7 +1285,7 @@ class ImplingFinder(commands.Cog):
             embed = self._embed_for_spawn(spawn)
             file = None
             if screenshots and (permissions is None or permissions.attach_files):
-                file = await self._make_screenshot_file(spawn)
+                file, _render_ms = await self._make_screenshot_file_for_send(spawn)
                 if file is not None:
                     embed.set_image(url=f"attachment://{file.filename}")
             if file is not None:
