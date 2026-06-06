@@ -27,7 +27,7 @@ from .core import (
     build_id_endpoint,
     build_map_url,
     collapse_duplicate_sightings,
-    explv_chunk_tile,
+    explv_tiles_for_crop,
     filter_stale_spawns,
     impling_icon_center,
     matching_channel_ids,
@@ -54,6 +54,7 @@ COG_DIR = Path(__file__).resolve().parent
 MAP_LABELS_PATH = COG_DIR / "data" / "map_labels.json"
 IMPLING_ASSET_DIR = COG_DIR / "assets"
 MAP_IMAGE_SIZE = 512
+MAP_CROP_SIZE = 512
 IMPLING_ICON_SIZE = 72
 
 
@@ -873,15 +874,27 @@ class ImplingFinder(commands.Cog):
             return None
         Image, _ImageDraw, _ImageFont = pillow
 
-        tile = explv_chunk_tile(spawn)
         try:
             fetch_started = time.monotonic()
-            tile_payload = await self._fetch_map_tile(tile.url)
-            fetch_ms = (time.monotonic() - fetch_started) * 1000
-            image = Image.open(io.BytesIO(tile_payload)).convert("RGBA").resize(
-                (MAP_IMAGE_SIZE, MAP_IMAGE_SIZE),
-                Image.Resampling.NEAREST,
+            tiles = explv_tiles_for_crop(
+                spawn,
+                width=MAP_CROP_SIZE,
+                height=MAP_CROP_SIZE,
             )
+            tile_payloads = await asyncio.gather(
+                *(self._fetch_map_tile(tile.url) for tile in tiles)
+            )
+            fetch_ms = (time.monotonic() - fetch_started) * 1000
+            image = Image.new("RGBA", (MAP_CROP_SIZE, MAP_CROP_SIZE), (0, 0, 0, 0))
+            for tile, tile_payload in zip(tiles, tile_payloads):
+                tile_image = Image.open(io.BytesIO(tile_payload)).convert("RGBA")
+                image.alpha_composite(tile_image, (tile.paste_x, tile.paste_y))
+
+            if MAP_CROP_SIZE != MAP_IMAGE_SIZE:
+                image = image.resize(
+                    (MAP_IMAGE_SIZE, MAP_IMAGE_SIZE),
+                    Image.Resampling.NEAREST,
+                )
             icon = Image.open(IMPLING_ASSET_DIR / f"{spawn.type_key}.png").convert("RGBA")
             icon.thumbnail(
                 (IMPLING_ICON_SIZE, IMPLING_ICON_SIZE),
@@ -903,7 +916,10 @@ class ImplingFinder(commands.Cog):
             )
             return None
 
-        center_x, center_y = impling_icon_center(spawn, canvas_size=MAP_IMAGE_SIZE)
+        center_x, center_y = impling_icon_center(spawn, canvas_size=MAP_CROP_SIZE)
+        if MAP_CROP_SIZE != MAP_IMAGE_SIZE:
+            center_x = round(center_x * (MAP_IMAGE_SIZE / MAP_CROP_SIZE))
+            center_y = round(center_y * (MAP_IMAGE_SIZE / MAP_CROP_SIZE))
         icon_x = max(0, min(MAP_IMAGE_SIZE - icon.width, center_x - icon.width // 2))
         icon_y = max(0, min(MAP_IMAGE_SIZE - icon.height, center_y - icon.height // 2))
         image.alpha_composite(icon, (icon_x, icon_y))

@@ -78,7 +78,7 @@ Type aliases:
 
 The backend does not provide real RuneLite screenshots. It only provides NPC ID, world, coordinates, plane, and discovered time.
 
-If `[p]implingset screenshots true` is enabled, this cog attaches the exact `8x8` OSRS chunk containing the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane.
+If `[p]implingset screenshots true` is enabled, this cog attaches a `16x16` OSRS area centered on the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane.
 
 If the map tile cannot be downloaded, the cog falls back to a generated card containing only the impling name, world, and location. Neither attachment is a real in-game RuneLite screenshot. A future RuneLite companion plugin would be needed for real screenshot uploads.
 
