@@ -64,36 +64,33 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
     async def _never_started(self):
         await __import__("asyncio").sleep(3600)
 
-    async def test_poll_loop_uses_fixed_start_cadence_after_slow_poll(self):
+    async def test_guild_poll_runner_uses_fixed_start_cadence_after_slow_poll(self):
         module = load_module("implingfinder.implingfinder")
         original_interval = module.MIN_POLL_INTERVAL_SECONDS
         module.MIN_POLL_INTERVAL_SECONDS = 0.05
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
         starts = []
 
-        async def wait_until_ready():
-            return None
-
-        async def poll_enabled_guilds():
+        async def poll_guild(_guild, _now_monotonic):
             starts.append(asyncio.get_running_loop().time())
             if len(starts) == 1:
                 await asyncio.sleep(0.07)
-                return
+                return 0.05
             raise asyncio.CancelledError()
 
-        cog._wait_until_ready = wait_until_ready
-        cog._poll_enabled_guilds = poll_enabled_guilds
+        cog._poll_guild_safely = poll_guild
 
         try:
             with self.assertRaises(asyncio.CancelledError):
-                await cog._poll_loop()
+                await cog._run_guild_poll_loop(guild)
         finally:
             module.MIN_POLL_INTERVAL_SECONDS = original_interval
 
         self.assertEqual(len(starts), 2)
         self.assertLess(starts[1] - starts[0], 0.105)
 
-    async def test_poll_loop_does_not_schedule_under_interval_after_late_wake(self):
+    async def test_guild_poll_runner_does_not_schedule_under_interval_after_late_wake(self):
         module = load_module("implingfinder.implingfinder")
         original_interval = module.MIN_POLL_INTERVAL_SECONDS
         original_monotonic = module.time.monotonic
@@ -103,6 +100,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         sleep_extras = [0.004, 0.0]
         starts = []
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
 
         def monotonic():
             return clock["now"]
@@ -111,22 +109,19 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             extra = sleep_extras.pop(0) if sleep_extras else 0.0
             clock["now"] += max(0.0, delay) + extra
 
-        async def wait_until_ready():
-            return None
-
-        async def poll_enabled_guilds():
+        async def poll_guild(_guild, _now_monotonic):
             starts.append(clock["now"])
             if len(starts) == 3:
                 raise asyncio.CancelledError()
+            return 0.05
 
-        cog._wait_until_ready = wait_until_ready
-        cog._poll_enabled_guilds = poll_enabled_guilds
+        cog._poll_guild_safely = poll_guild
 
         try:
             module.time.monotonic = monotonic
             module.asyncio.sleep = sleep
             with self.assertRaises(asyncio.CancelledError):
-                await cog._poll_loop()
+                await cog._run_guild_poll_loop(guild)
         finally:
             module.MIN_POLL_INTERVAL_SECONDS = original_interval
             module.time.monotonic = original_monotonic
@@ -134,6 +129,92 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(starts), 3)
         self.assertGreaterEqual(starts[2] - starts[1], 0.05)
+
+    async def test_sync_poll_runners_starts_and_cancels_per_guild_tasks(self):
+        module = load_module("implingfinder.implingfinder")
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters")
+        settings = {
+            "enabled": True,
+            "channels": {"456": [1644]},
+            "poll_interval": 5,
+            "endpoint": module.DEFAULT_ENDPOINT,
+        }
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None, guilds=[guild]))
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def run_guild_poll_loop(received_guild):
+            self.assertIs(received_guild, guild)
+            started.set()
+            await release.wait()
+
+        cog.config.guild = lambda _guild: types.SimpleNamespace(all=self._async_return(settings))
+        cog._cog_disabled_in_guild = self._async_return(False)
+        cog._run_guild_poll_loop = run_guild_poll_loop
+
+        try:
+            await cog._sync_poll_runners()
+            await asyncio.wait_for(started.wait(), timeout=0.05)
+            self.assertIn(guild.id, cog._poll_runner_tasks)
+
+            settings["enabled"] = False
+            await cog._sync_poll_runners()
+            self.assertNotIn(guild.id, cog._poll_runner_tasks)
+        finally:
+            release.set()
+            for task in list(getattr(cog, "_poll_runner_tasks", {}).values()):
+                task.cancel()
+            if getattr(cog, "_poll_runner_tasks", None):
+                await asyncio.gather(*cog._poll_runner_tasks.values(), return_exceptions=True)
+
+    async def test_spawn_post_queues_screenshot_edit_job(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        cog.metrics_store = types.SimpleNamespace(record=lambda _event: None)
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", me=None)
+
+        class Message:
+            id = 999
+
+        class Channel:
+            id = 456
+            name = "rare-imps"
+
+            async def send(self, *args, **kwargs):
+                return Message()
+
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2914,
+            ycoord=3323,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        cog._bot_permissions = lambda _guild, _channel: types.SimpleNamespace(
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+        )
+
+        message = await cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True)
+
+        self.assertEqual(message.id, 999)
+        self.assertEqual(cog._screenshot_queue.qsize(), 1)
+
+    async def test_process_queues_post_poll_maintenance_job(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda _channel_id: None)
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [1644]},
+            [],
+        )
+
+        self.assertEqual(cog._maintenance_queue.qsize(), 1)
 
     async def test_spawn_posts_immediately_then_edits_generated_map_attachment(self):
         module = load_module("implingfinder.implingfinder")
@@ -184,25 +265,28 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             attach_files=True,
         )
         cog._make_screenshot_file = make_screenshot_file
+        cog._start_screenshot_workers(count=1)
 
-        sent_message = await asyncio.wait_for(
-            cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
-            timeout=0.05,
-        )
+        try:
+            sent_message = await asyncio.wait_for(
+                cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
+                timeout=0.05,
+            )
 
-        self.assertEqual(sent_message.id, 999)
-        self.assertEqual(len(sent_messages), 1)
-        _, kwargs = sent_messages[0]
-        self.assertNotIn("file", kwargs)
-        self.assertIsNone(kwargs["embed"].image)
-        self.assertEqual(recorded[-1].kind, "post")
-        self.assertIsNone(recorded[-1].render_ms)
+            self.assertEqual(sent_message.id, 999)
+            self.assertEqual(len(sent_messages), 1)
+            _, kwargs = sent_messages[0]
+            self.assertNotIn("file", kwargs)
+            self.assertIsNone(kwargs["embed"].image)
+            self.assertEqual(recorded[-1].kind, "post")
+            self.assertIsNone(recorded[-1].render_ms)
 
-        await asyncio.wait_for(render_started.wait(), timeout=0.05)
-        tasks = list(cog._screenshot_edit_tasks)
-        self.assertEqual(calls, [spawn])
-        finish_render.set()
-        await asyncio.wait_for(asyncio.gather(*tasks), timeout=0.25)
+            await asyncio.wait_for(render_started.wait(), timeout=0.05)
+            self.assertEqual(calls, [spawn])
+            finish_render.set()
+            await asyncio.wait_for(cog._screenshot_queue.join(), timeout=0.25)
+        finally:
+            await self._cancel_screenshot_workers(cog)
 
         self.assertEqual(len(edited_messages), 1)
         edit_kwargs = edited_messages[0]
@@ -384,16 +468,25 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         }
 
     async def _cancel_post_poll_tasks(self, cog):
-        tasks = list(getattr(cog, "_post_poll_tasks", set()))
+        tasks = list(getattr(cog, "_maintenance_worker_tasks", set()))
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _wait_post_poll_tasks(self, cog):
-        tasks = list(getattr(cog, "_post_poll_tasks", set()))
+        queue = getattr(cog, "_maintenance_queue", None)
+        self.assertIsNotNone(queue)
+        cog._start_maintenance_workers(count=1)
+        await asyncio.wait_for(queue.join(), timeout=0.25)
+        await self._cancel_post_poll_tasks(cog)
+
+    async def _cancel_screenshot_workers(self, cog):
+        tasks = list(getattr(cog, "_screenshot_worker_tasks", set()))
+        for task in tasks:
+            task.cancel()
         if tasks:
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=0.25)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_interval_command_accepts_five_second_minimum(self):
         module = load_module("implingfinder.implingfinder")
@@ -604,6 +697,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         cog._send_spawn_to_channel = send_spawn
         cog._delete_missing_active_messages = blocked_maintenance
         cog._clean_feed_channels = blocked_maintenance
+        cog._start_maintenance_workers(count=1)
 
         try:
             await asyncio.wait_for(
@@ -927,15 +1021,13 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             cog._send_spawn_to_channel(guild, Channel(), spawn, screenshots=True),
             timeout=0.05,
         )
-        for task in list(cog._screenshot_edit_tasks):
-            task.cancel()
-        await asyncio.gather(*cog._screenshot_edit_tasks, return_exceptions=True)
 
         self.assertIs(sent_message, message)
         self.assertEqual(len(sent_messages), 1)
         _args, kwargs = sent_messages[0]
         self.assertNotIn("file", kwargs)
         self.assertIsNone(kwargs["embed"].image)
+        self.assertEqual(cog._screenshot_queue.qsize(), 1)
         post_event = recorded[-1]
         self.assertEqual(post_event.kind, "post")
         self.assertEqual(post_event.outcome, "ok")

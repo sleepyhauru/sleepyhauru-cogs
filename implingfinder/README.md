@@ -78,7 +78,7 @@ Type aliases:
 
 The backend does not provide real RuneLite screenshots. It only provides NPC ID, world, coordinates, plane, and discovered time.
 
-If `[p]implingset screenshots true` is enabled, this cog sends the sighting post immediately, then edits the same Discord message to attach a `32x32` OSRS area centered on the sighting after the map is generated. A small matching impling image is centered on the reported game tile. If the map cannot be rendered or the sighting message is already gone, the original Discord post is left in place without the attachment.
+If `[p]implingset screenshots true` is enabled, this cog sends the sighting post immediately, then queues a screenshot worker to edit the same Discord message with a `32x32` OSRS area centered on the sighting after the map is generated. A small matching impling image is centered on the reported game tile. If the map cannot be rendered, the screenshot queue is full, or the sighting message is already gone, the original Discord post is left in place without the attachment.
 
 Discord posts say the impling spawned, link the `{type} Impling spawned` title to Explv at zoom 7, and use only Discord's relative timestamp for `Discovered`, such as "5 minutes ago", without showing the exact discovered time.
 
@@ -98,7 +98,7 @@ The backend can report the same moving impling several times with slightly diffe
 
 When a tracked sighting is missing from the fresh sightings in the latest successful backend response, the cog edits the Discord message it posted for that sighting to say the impling despawned, keeps the screenshot in the embed, removes the stored active message ID, and deletes the despawn notice 30 seconds later. Messages are kept for retry if Discord rejects the edit because of permissions or a transient API error.
 
-After each successful backend response, new live sightings are posted before despawn and cleanup maintenance. Matching channel sends run concurrently, then post-poll maintenance marks despawns and runs feed cleanup in the background. Recurring feed cleanup is throttled to every 30 seconds per guild and deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger despawn or feed cleanup.
+After each successful backend response, new live sightings are posted before despawn and cleanup maintenance. Matching channel sends run concurrently, then post-poll maintenance is queued for a dedicated worker that marks despawns and runs feed cleanup in the background. Recurring feed cleanup is throttled to every 30 seconds per guild and deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger despawn or feed cleanup.
 
 On cog load or reload, the cog also performs a one-time feed scrub against stored active message IDs so configured feed channels are cleaned promptly. The authoritative despawn pass still requires a successful backend response before tracked active messages are deleted or cleared.
 
@@ -108,9 +108,10 @@ For competitive hunting, set the interval to the minimum:
 [p]implingset interval 5
 ```
 
-The interval is a fixed-start cadence, so the cog does not sleep an extra 5
-seconds after a slow backend fetch. If a backend read takes longer than the
-configured interval, the next poll starts as soon as the previous poll finishes.
+Each enabled guild has its own fixed-start poll runner, so the cog does not sleep
+an extra 5 seconds after a slow backend fetch. If a backend read takes longer
+than the configured interval, the next poll starts as soon as the previous poll
+finishes.
 
 ## Location and Asset Sources
 
@@ -127,8 +128,9 @@ the dashboard does not implement its own authentication.
 The dashboard tracks backend fetches, poll processing, duplicate suppression,
 routed sightings, map download/render work, Discord posting, screenshot attachment
 edits, age-at-fetch latency, bot-after-fetch posting gap, discovery-to-post
-latency, despawn edits, feed cleanup, errors, active backend backoffs, event-loop
-lag, memory use, queue health, and database size.
+latency, despawn edits, feed cleanup, errors, active backend backoffs, poll
+runners, worker queue depth, event-loop lag, memory use, metrics queue health,
+and database size.
 
 Metrics are written through a bounded non-blocking queue so dashboard storage
 cannot delay a sighting post. Individual events are retained for 7 days and

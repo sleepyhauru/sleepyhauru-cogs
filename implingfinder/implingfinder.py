@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -62,6 +63,11 @@ FEED_CLEANUP_INTERVAL_SECONDS = 30.0
 DESPAWN_DELETE_DELAY_SECONDS = 30.0
 DESPAWN_NOTICE_RETENTION_SECONDS = DESPAWN_DELETE_DELAY_SECONDS
 DESPAWN_DEFAULT_IMAGE_URL = "attachment://impling-map.png"
+POLL_SUPERVISOR_INTERVAL_SECONDS = MIN_POLL_INTERVAL_SECONDS
+SCREENSHOT_WORKER_COUNT = 4
+SCREENSHOT_QUEUE_SIZE = 128
+MAINTENANCE_WORKER_COUNT = 1
+MAINTENANCE_QUEUE_SIZE = 256
 
 
 def _display_impling_name(name: str) -> str:
@@ -78,6 +84,26 @@ class BackendError(Exception):
 
 class MapTileError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class ScreenshotEditJob:
+    guild: discord.Guild
+    channel: Any
+    message: discord.Message
+    spawn: ImplingSpawn
+    fetch_ms: Optional[float]
+    fetch_completed_at: Optional[datetime]
+    process_ms: Optional[float]
+
+
+@dataclass(frozen=True)
+class MaintenanceJob:
+    guild: discord.Guild
+    channels: dict[str, list[int]]
+    current_sighting_keys: set[str]
+    current_sighting_aliases: dict[str, str]
+    current_spawns_by_key: dict[str, ImplingSpawn]
 
 
 class ImplingFinder(commands.Cog):
@@ -100,7 +126,7 @@ class ImplingFinder(commands.Cog):
 
         self.session: Optional[aiohttp.ClientSession] = None
         self._poll_task: Optional[asyncio.Task] = None
-        self._last_poll: dict[int, float] = {}
+        self._poll_runner_tasks: dict[int, asyncio.Task] = {}
         self._failure_counts: dict[int, int] = {}
         self._backoff_until: dict[int, float] = {}
         self._pillow_warning_logged = False
@@ -109,9 +135,15 @@ class ImplingFinder(commands.Cog):
         self.dashboard: Optional[DashboardServer] = None
         self._started_at = time.time()
         self._startup_cleaned_guilds: set[int] = set()
-        self._screenshot_edit_tasks: set[asyncio.Task] = set()
+        self._screenshot_queue: asyncio.Queue[ScreenshotEditJob] = asyncio.Queue(
+            maxsize=SCREENSHOT_QUEUE_SIZE
+        )
+        self._screenshot_worker_tasks: set[asyncio.Task] = set()
         self._despawn_delete_tasks: set[asyncio.Task] = set()
-        self._post_poll_tasks: set[asyncio.Task] = set()
+        self._maintenance_queue: asyncio.Queue[MaintenanceJob] = asyncio.Queue(
+            maxsize=MAINTENANCE_QUEUE_SIZE
+        )
+        self._maintenance_worker_tasks: set[asyncio.Task] = set()
         self._last_feed_cleanup: dict[int, float] = {}
         self._despawn_notice_until_by_channel: dict[str, dict[int, float]] = {}
 
@@ -142,16 +174,20 @@ class ImplingFinder(commands.Cog):
                     DASHBOARD_HOST,
                     DASHBOARD_PORT,
                 )
+        self._start_screenshot_workers()
+        self._start_maintenance_workers()
         self._poll_task = asyncio.create_task(self._poll_loop(), name="implingfinder-poller")
 
     def cog_unload(self) -> None:
         if self._poll_task is not None:
             self._poll_task.cancel()
-        for task in list(self._screenshot_edit_tasks):
+        for task in list(self._poll_runner_tasks.values()):
+            task.cancel()
+        for task in list(self._screenshot_worker_tasks):
             task.cancel()
         for task in list(self._despawn_delete_tasks):
             task.cancel()
-        for task in list(self._post_poll_tasks):
+        for task in list(self._maintenance_worker_tasks):
             task.cancel()
         self._create_task(self._close_resources())
 
@@ -161,34 +197,93 @@ class ImplingFinder(commands.Cog):
             return loop.create_task(coro)
         return asyncio.create_task(coro)
 
-    def _create_screenshot_edit_task(self, coro) -> asyncio.Task:
-        task = self._create_task(coro)
-        self._screenshot_edit_tasks.add(task)
-        task.add_done_callback(lambda completed: self._screenshot_edit_tasks.discard(completed))
-        return task
-
     def _create_despawn_delete_task(self, coro) -> asyncio.Task:
         task = self._create_task(coro)
         self._despawn_delete_tasks.add(task)
         task.add_done_callback(lambda completed: self._despawn_delete_tasks.discard(completed))
         return task
 
-    def _create_post_poll_task(self, coro) -> asyncio.Task:
-        task = self._create_task(coro)
-        self._post_poll_tasks.add(task)
-        task.add_done_callback(lambda completed: self._post_poll_tasks.discard(completed))
-        return task
+    def _start_screenshot_workers(self, *, count: int = SCREENSHOT_WORKER_COUNT) -> None:
+        active_count = sum(1 for task in self._screenshot_worker_tasks if not task.done())
+        for index in range(max(0, int(count) - active_count)):
+            task = self._create_task(self._screenshot_worker_loop())
+            self._screenshot_worker_tasks.add(task)
+            task.add_done_callback(lambda completed: self._screenshot_worker_tasks.discard(completed))
+
+    def _start_maintenance_workers(self, *, count: int = MAINTENANCE_WORKER_COUNT) -> None:
+        active_count = sum(1 for task in self._maintenance_worker_tasks if not task.done())
+        for index in range(max(0, int(count) - active_count)):
+            task = self._create_task(self._maintenance_worker_loop())
+            self._maintenance_worker_tasks.add(task)
+            task.add_done_callback(lambda completed: self._maintenance_worker_tasks.discard(completed))
+
+    async def _screenshot_worker_loop(self) -> None:
+        while True:
+            job = await self._screenshot_queue.get()
+            try:
+                await self._edit_spawn_message_with_screenshot(
+                    job.guild,
+                    job.channel,
+                    job.message,
+                    job.spawn,
+                    fetch_ms=job.fetch_ms,
+                    fetch_completed_at=job.fetch_completed_at,
+                    process_ms=job.process_ms,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "Impling Finder screenshot worker failed for message %s in channel %s",
+                    getattr(job.message, "id", "?"),
+                    getattr(job.channel, "id", "?"),
+                )
+            finally:
+                self._screenshot_queue.task_done()
+
+    async def _maintenance_worker_loop(self) -> None:
+        while True:
+            job = await self._maintenance_queue.get()
+            try:
+                await self._run_post_poll_maintenance(
+                    job.guild,
+                    job.channels,
+                    job.current_sighting_keys,
+                    job.current_sighting_aliases,
+                    job.current_spawns_by_key,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "Impling Finder maintenance worker failed for guild %s",
+                    getattr(job.guild, "id", "?"),
+                )
+            finally:
+                self._maintenance_queue.task_done()
 
     async def _close_resources(self) -> None:
         if self._poll_task is not None:
+            self._poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
-        if self._screenshot_edit_tasks:
-            await asyncio.gather(*self._screenshot_edit_tasks, return_exceptions=True)
+        for task in list(self._poll_runner_tasks.values()):
+            task.cancel()
+        for task in list(self._screenshot_worker_tasks):
+            task.cancel()
+        for task in list(self._despawn_delete_tasks):
+            task.cancel()
+        for task in list(self._maintenance_worker_tasks):
+            task.cancel()
+        if self._poll_runner_tasks:
+            await asyncio.gather(*self._poll_runner_tasks.values(), return_exceptions=True)
+            self._poll_runner_tasks.clear()
+        if self._screenshot_worker_tasks:
+            await asyncio.gather(*self._screenshot_worker_tasks, return_exceptions=True)
         if self._despawn_delete_tasks:
             await asyncio.gather(*self._despawn_delete_tasks, return_exceptions=True)
-        if self._post_poll_tasks:
-            await asyncio.gather(*self._post_poll_tasks, return_exceptions=True)
+        if self._maintenance_worker_tasks:
+            await asyncio.gather(*self._maintenance_worker_tasks, return_exceptions=True)
         if self.dashboard is not None:
             try:
                 await self.dashboard.stop()
@@ -227,6 +322,9 @@ class ImplingFinder(commands.Cog):
             "bot_uptime_seconds": max(0, round(uptime_seconds)),
             "active_backoffs": sum(1 for deadline in self._backoff_until.values() if deadline > now),
             "enabled_guilds": len(getattr(self.bot, "guilds", [])),
+            "poll_runners": len(self._poll_runner_tasks),
+            "screenshot_queue_depth": self._screenshot_queue.qsize(),
+            "maintenance_queue_depth": self._maintenance_queue.qsize(),
         }
 
     async def _wait_until_ready(self) -> None:
@@ -245,19 +343,61 @@ class ImplingFinder(commands.Cog):
 
     async def _poll_loop(self) -> None:
         await self._wait_until_ready()
-        next_poll_at = time.monotonic()
         while True:
-            poll_started = time.monotonic()
             try:
-                await self._poll_enabled_guilds()
+                await self._sync_poll_runners()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("Impling Finder polling loop hit an unexpected error")
-            next_poll_at = max(
-                next_poll_at + MIN_POLL_INTERVAL_SECONDS,
-                poll_started + MIN_POLL_INTERVAL_SECONDS,
-            )
+                log.exception("Impling Finder poll supervisor hit an unexpected error")
+            await asyncio.sleep(POLL_SUPERVISOR_INTERVAL_SECONDS)
+
+    async def _sync_poll_runners(self) -> None:
+        active_guild_ids: set[int] = set()
+        for guild in list(getattr(self.bot, "guilds", [])):
+            guild_id = getattr(guild, "id", None)
+            if guild_id is None:
+                continue
+            should_run = False
+            if not await self._cog_disabled_in_guild(guild):
+                settings = await self.config.guild(guild).all()
+                should_run = bool(settings.get("enabled")) and bool(
+                    self._normalize_channels(settings.get("channels", {}))
+                )
+            active_guild_ids.add(guild_id)
+            task = self._poll_runner_tasks.get(guild_id)
+            if should_run:
+                if task is None or task.done():
+                    task = self._create_task(self._run_guild_poll_loop(guild))
+                    self._poll_runner_tasks[guild_id] = task
+                    task.add_done_callback(
+                        lambda completed, done_guild_id=guild_id: (
+                            self._poll_runner_tasks.pop(done_guild_id, None)
+                            if self._poll_runner_tasks.get(done_guild_id) is completed
+                            else None
+                        )
+                    )
+            elif task is not None:
+                task.cancel()
+                self._poll_runner_tasks.pop(guild_id, None)
+
+        for guild_id, task in list(self._poll_runner_tasks.items()):
+            if guild_id not in active_guild_ids:
+                task.cancel()
+                self._poll_runner_tasks.pop(guild_id, None)
+
+    async def _run_guild_poll_loop(self, guild: discord.Guild) -> None:
+        next_poll_at = time.monotonic()
+        while True:
+            poll_started = time.monotonic()
+            interval = MIN_POLL_INTERVAL_SECONDS
+            try:
+                configured_interval = await self._poll_guild_safely(guild, poll_started)
+                if configured_interval is not None:
+                    interval = max(MIN_POLL_INTERVAL_SECONDS, configured_interval)
+            except asyncio.CancelledError:
+                raise
+            next_poll_at = max(next_poll_at + interval, poll_started + interval)
             now = time.monotonic()
             if next_poll_at <= now:
                 next_poll_at = now
@@ -273,25 +413,34 @@ class ImplingFinder(commands.Cog):
             )
         )
 
-    async def _poll_guild_safely(self, guild: discord.Guild, now_monotonic: float) -> None:
+    async def _poll_guild_safely(
+        self,
+        guild: discord.Guild,
+        now_monotonic: float,
+    ) -> Optional[float]:
         try:
-            await self._poll_guild(guild, now_monotonic)
+            return await self._poll_guild(guild, now_monotonic)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("Impling Finder failed while polling guild %s", getattr(guild, "id", "?"))
+            return MIN_POLL_INTERVAL_SECONDS
 
-    async def _poll_guild(self, guild: discord.Guild, now_monotonic: float) -> None:
+    async def _poll_guild(
+        self,
+        guild: discord.Guild,
+        now_monotonic: float,
+    ) -> Optional[float]:
         if await self._cog_disabled_in_guild(guild):
-            return
+            return None
 
         settings = await self.config.guild(guild).all()
         if not settings.get("enabled"):
-            return
+            return None
 
         channels = self._normalize_channels(settings.get("channels", {}))
         if not channels:
-            return
+            return None
 
         await self._clean_feed_channels_on_startup(guild, channels)
 
@@ -299,13 +448,9 @@ class ImplingFinder(commands.Cog):
             MIN_POLL_INTERVAL_SECONDS,
             int(settings.get("poll_interval", DEFAULT_POLL_INTERVAL_SECONDS)),
         )
-        if now_monotonic - self._last_poll.get(guild.id, 0) < interval:
-            return
-
         if now_monotonic < self._backoff_until.get(guild.id, 0):
-            return
+            return max(MIN_POLL_INTERVAL_SECONDS, self._backoff_until[guild.id] - now_monotonic)
 
-        self._last_poll[guild.id] = now_monotonic
         poll_started = time.monotonic()
         fetch_started = time.monotonic()
 
@@ -326,7 +471,10 @@ class ImplingFinder(commands.Cog):
                 )
             )
             self._record_backend_failure(guild.id, exc)
-            return
+            return max(
+                MIN_POLL_INTERVAL_SECONDS,
+                self._backoff_until.get(guild.id, now_monotonic + interval) - now_monotonic,
+            )
         except ValueError as exc:
             fetch_ms = (time.monotonic() - fetch_started) * 1000
             self._record_metric(
@@ -341,7 +489,7 @@ class ImplingFinder(commands.Cog):
                 )
             )
             log.warning("Invalid Impling Finder endpoint for guild %s: %s", guild.id, exc)
-            return
+            return interval
 
         fetch_ms = (time.monotonic() - fetch_started) * 1000
         fetch_completed_at = datetime.now(timezone.utc)
@@ -378,6 +526,7 @@ class ImplingFinder(commands.Cog):
                 items_count=len(spawns),
             )
         )
+        return interval
 
     async def _process_polled_spawns(
         self,
@@ -515,15 +664,63 @@ class ImplingFinder(commands.Cog):
         current_sighting_aliases: Mapping[str, str],
         current_spawns_by_key: Mapping[str, ImplingSpawn],
     ) -> None:
-        self._create_post_poll_task(
-            self._run_post_poll_maintenance(
-                guild,
-                dict(channels),
-                set(current_sighting_keys),
-                dict(current_sighting_aliases),
-                dict(current_spawns_by_key),
+        try:
+            self._maintenance_queue.put_nowait(
+                MaintenanceJob(
+                    guild=guild,
+                    channels=dict(channels),
+                    current_sighting_keys=set(current_sighting_keys),
+                    current_sighting_aliases=dict(current_sighting_aliases),
+                    current_spawns_by_key=dict(current_spawns_by_key),
+                )
             )
-        )
+        except asyncio.QueueFull:
+            log.warning(
+                "Impling Finder maintenance queue is full; skipped maintenance for guild %s",
+                getattr(guild, "id", "?"),
+            )
+
+    def _enqueue_screenshot_edit(
+        self,
+        guild: discord.Guild,
+        channel,
+        message: discord.Message,
+        spawn: ImplingSpawn,
+        *,
+        fetch_ms: Optional[float],
+        fetch_completed_at: Optional[datetime],
+        process_ms: Optional[float],
+    ) -> None:
+        try:
+            self._screenshot_queue.put_nowait(
+                ScreenshotEditJob(
+                    guild=guild,
+                    channel=channel,
+                    message=message,
+                    spawn=spawn,
+                    fetch_ms=fetch_ms,
+                    fetch_completed_at=fetch_completed_at,
+                    process_ms=process_ms,
+                )
+            )
+        except asyncio.QueueFull:
+            log.warning(
+                "Impling Finder screenshot queue is full; skipped map edit for message %s",
+                getattr(message, "id", "?"),
+            )
+            self._record_attachment_metric(
+                guild,
+                channel,
+                spawn,
+                outcome="error",
+                total_started=time.monotonic(),
+                fetch_ms=fetch_ms,
+                fetch_completed_at=fetch_completed_at,
+                process_ms=process_ms,
+                render_ms=None,
+                send_ms=None,
+                error_category="queue_full",
+            )
 
     async def _run_post_poll_maintenance(
         self,
@@ -1438,16 +1635,14 @@ class ImplingFinder(commands.Cog):
                 send_ms=send_ms,
             )
             if should_edit_screenshot:
-                self._create_screenshot_edit_task(
-                    self._edit_spawn_message_with_screenshot(
-                        guild,
-                        channel,
-                        message,
-                        spawn,
-                        fetch_ms=fetch_ms,
-                        fetch_completed_at=fetch_completed_at,
-                        process_ms=process_ms,
-                    )
+                self._enqueue_screenshot_edit(
+                    guild,
+                    channel,
+                    message,
+                    spawn,
+                    fetch_ms=fetch_ms,
+                    fetch_completed_at=fetch_completed_at,
+                    process_ms=process_ms,
                 )
             return message
         except discord.Forbidden:

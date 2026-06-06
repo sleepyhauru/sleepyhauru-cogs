@@ -35,14 +35,16 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   7. Do not display NPC ID, plane, a source footer, a separate Coordinates
   field, or an absolute discovered time.
 - Screenshot-enabled feed posts send the Discord message immediately, then edit
-  that same message with the generated map attachment when rendering finishes.
-  Screenshot attachments show the current `32x32` OSRS area centered on the
-  sighting and place a matching impling icon centered on the reported game tile.
+  that same message with the generated map attachment from a bounded screenshot
+  worker queue when rendering finishes. Screenshot attachments show the current
+  `32x32` OSRS area centered on the sighting and place a matching impling icon
+  centered on the reported game tile.
 - New live sighting posts are sent before post-poll despawn/cleanup maintenance.
   Matching channel sends run concurrently; post-poll maintenance runs in the
-  background and feed cleanup is throttled to avoid extending the poll cycle.
-- Polling uses a fixed-start cadence. A slow backend fetch must not add another
-  full interval of sleep after it finishes.
+  background through a bounded maintenance queue and feed cleanup is throttled
+  to avoid extending the poll cycle.
+- Polling uses one runner per enabled guild with a fixed-start cadence. A slow
+  backend fetch must not add another full interval of sleep after it finishes.
 - Preserve migration support for previously stored exact dedupe keys and coarse
   area keys when changing sighting-state behavior.
 
@@ -63,9 +65,10 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
 
 ## Important Implementation Details
 
-- The minimum polling interval is `5` seconds; default is `5`. The interval is
-  measured from scheduled poll start to scheduled poll start, not from poll
-  completion to the next start.
+- The minimum polling interval is `5` seconds; default is `5`. Each enabled
+  guild has its own poll runner, and the interval is measured from scheduled
+  poll start to scheduled poll start, not from poll completion to the next
+  start.
 - Location resolution prefers the nearest same-plane label in the same official
   region, then `Near <nearest same-plane label>`, then `Unknown area`.
 - Region-based sighting keys deliberately allow a moving impling to update
