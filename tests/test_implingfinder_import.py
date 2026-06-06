@@ -185,6 +185,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
         recorded = []
+        cleaned = []
         cog.metrics_store = types.SimpleNamespace(record=lambda event: recorded.append(event))
         guild = types.SimpleNamespace(id=123, name="Impling Hunters")
         settings = {
@@ -201,15 +202,52 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         cog._fetch_spawns = fail_fetch
 
+        async def clean_feed_channels(received_guild, channels):
+            cleaned.append((received_guild, channels))
+
+        cog._clean_feed_channels = clean_feed_channels
+
         with self.assertLogs("red.implingfinder", level="WARNING"):
             await cog._poll_guild(guild, 1_000)
 
+        self.assertEqual(cleaned, [(guild, {"456": [1644]})])
         event = recorded[-1]
         self.assertEqual(event.kind, "fetch")
         self.assertEqual(event.outcome, "error")
         self.assertEqual(event.guild_name, "Impling Hunters")
         self.assertEqual(event.error_category, "http_503")
         self.assertIsNotNone(event.fetch_ms)
+
+    async def test_startup_feed_cleanup_runs_only_once_per_cog_instance(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        cleaned = []
+        processed = []
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters")
+        settings = {
+            "enabled": True,
+            "channels": {"456": [1644]},
+            "poll_interval": 5,
+            "endpoint": module.DEFAULT_ENDPOINT,
+        }
+        cog.config.guild = lambda _guild: types.SimpleNamespace(all=self._async_return(settings))
+        cog._cog_disabled_in_guild = self._async_return(False)
+        cog._fetch_spawns = self._async_return([])
+
+        async def clean_feed_channels(received_guild, channels):
+            cleaned.append((received_guild, channels))
+
+        async def process_polled_spawns(*args, **kwargs):
+            processed.append(args)
+
+        cog._clean_feed_channels = clean_feed_channels
+        cog._process_polled_spawns = process_polled_spawns
+
+        await cog._poll_guild(guild, 1_000)
+        await cog._poll_guild(guild, 1_006)
+
+        self.assertEqual(cleaned, [(guild, {"456": [1644]})])
+        self.assertEqual(len(processed), 2)
 
     def _async_return(self, value):
         async def result(*args, **kwargs):
@@ -250,9 +288,13 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [field.name for field in embed.fields],
-            ["World", "Location", "Discovered", "Map"],
+            ["World", "Location", "Discovered"],
         )
         self.assertEqual(embed.fields[1].value, "Varrock")
+        self.assertEqual(embed.fields[2].value, "<t:1715000000:R>")
+        self.assertNotIn("<t:1715000000:F>", embed.fields[2].value)
+        self.assertIsNone(embed.url)
+        self.assertIsNone(embed.timestamp)
         self.assertIsNone(embed.footer)
         content = cog._content_for_spawn(spawn)
         self.assertIn("Varrock", content)

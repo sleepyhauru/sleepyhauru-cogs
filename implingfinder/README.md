@@ -80,6 +80,8 @@ The backend does not provide real RuneLite screenshots. It only provides NPC ID,
 
 If `[p]implingset screenshots true` is enabled, this cog attaches a `16x16` OSRS area centered on the sighting. A small matching impling image is placed on the reported game tile. The attached map does not display coordinates or plane. If the map cannot be rendered quickly, the Discord post is sent without waiting for the attachment.
 
+Discord posts do not include an external map hyperlink. The `Discovered` field only uses Discord's relative timestamp, such as "5 minutes ago", and does not show the exact discovered time.
+
 If the map tile cannot be downloaded, the cog falls back to a generated card containing only the impling name, world, and location. Neither attachment is a real in-game RuneLite screenshot. A future RuneLite companion plugin would be needed for real screenshot uploads.
 
 Pillow is installed as a cog dependency.
@@ -97,6 +99,8 @@ The backend can report the same moving impling several times with slightly diffe
 When a tracked sighting disappears from the latest successful backend response, the cog deletes the Discord message it posted for that sighting and removes the stored message ID. Messages are kept for retry if Discord rejects the delete because of permissions or a transient API error.
 
 After each successful backend response, configured ImplingFinder feed channels are also cleaned so they only contain active live impling posts. The cleanup deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger feed cleanup.
+
+On cog load or reload, the cog also performs a one-time feed scrub against stored active message IDs so configured feed channels are cleaned promptly. The authoritative despawn pass still requires a successful backend response before tracked active messages are deleted or cleared.
 
 For competitive hunting, set the interval to the minimum:
 

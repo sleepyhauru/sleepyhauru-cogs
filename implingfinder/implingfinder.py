@@ -25,7 +25,6 @@ from .core import (
     MapLabel,
     MIN_POLL_INTERVAL_SECONDS,
     build_id_endpoint,
-    build_map_url,
     collapse_duplicate_sightings,
     explv_tiles_for_crop,
     filter_stale_spawns,
@@ -99,6 +98,7 @@ class ImplingFinder(commands.Cog):
         self.metrics_store: Optional[MetricsStore] = None
         self.dashboard: Optional[DashboardServer] = None
         self._started_at = time.time()
+        self._startup_cleaned_guilds: set[int] = set()
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession(
@@ -230,6 +230,8 @@ class ImplingFinder(commands.Cog):
         channels = self._normalize_channels(settings.get("channels", {}))
         if not channels:
             return
+
+        await self._clean_feed_channels_on_startup(guild, channels)
 
         interval = max(
             MIN_POLL_INTERVAL_SECONDS,
@@ -833,6 +835,22 @@ class ImplingFinder(commands.Cog):
         self._failure_counts.pop(guild_id, None)
         self._backoff_until.pop(guild_id, None)
 
+    async def _clean_feed_channels_on_startup(
+        self,
+        guild: discord.Guild,
+        channels: Mapping[str, list[int]],
+    ) -> None:
+        if guild.id in self._startup_cleaned_guilds:
+            return
+        self._startup_cleaned_guilds.add(guild.id)
+        try:
+            await self._clean_feed_channels(guild, channels)
+        except Exception:
+            log.exception(
+                "Impling Finder failed during startup feed cleanup for guild %s",
+                guild.id,
+            )
+
     def _load_map_labels(self) -> list[MapLabel]:
         try:
             raw_labels = json.loads(MAP_LABELS_PATH.read_text(encoding="utf-8"))
@@ -862,23 +880,19 @@ class ImplingFinder(commands.Cog):
         type_key = spawn.type_key or "dragon"
         info = IMPLINGS.get(type_key)
         color = info.color if info is not None else 0x5865F2
-        map_url = build_map_url(spawn)
         location = self._location_for_spawn(spawn)
 
         embed = discord.Embed(
             title=f"{spawn.impling_name} spotted",
-            url=map_url,
             color=color,
-            timestamp=spawn.discovered.astimezone(timezone.utc),
         )
         embed.add_field(name="World", value=str(spawn.world), inline=True)
         embed.add_field(name="Location", value=location, inline=True)
         embed.add_field(
             name="Discovered",
-            value=f"<t:{spawn.discovered_epoch}:F>\n<t:{spawn.discovered_epoch}:R>",
+            value=f"<t:{spawn.discovered_epoch}:R>",
             inline=True,
         )
-        embed.add_field(name="Map", value=f"[Open Explv map]({map_url})", inline=False)
         return embed
 
     def _content_for_spawn(self, spawn: ImplingSpawn) -> str:

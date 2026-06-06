@@ -25,8 +25,13 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   deleting non-pinned messages that are not active live impling posts. This
   includes human messages and requires Manage Messages plus Read Message
   History. Backend failures must not trigger feed cleanup.
-- Discord posts display World, human-readable Location, Discovered, and Map.
-  Do not display coordinates, NPC ID, age, plane, or a source footer.
+- On cog load or reload, perform a one-time feed scrub against stored active
+  message IDs so configured feed channels are cleaned promptly. This startup
+  scrub must not delete tracked active messages or clear active state without a
+  successful backend response.
+- Discord posts display World, human-readable Location, and relative
+  Discovered only. Do not display coordinates, NPC ID, plane, a source footer,
+  a map hyperlink, or an absolute discovered time.
 - Screenshot attachments show the current `16x16` OSRS area centered on the
   sighting and place a matching impling icon on the reported game tile.
 - Preserve migration support for previously stored exact dedupe keys and coarse
@@ -58,7 +63,8 @@ Leave unrelated cogs untouched unless the user explicitly expands the task.
   failures must not delete active Discord messages.
 - Feed-channel cleanup must only follow a successful backend response. Do not
   delete pinned messages, and do not scan channels outside configured
-  ImplingFinder feed channels.
+  ImplingFinder feed channels. The only exception is the one-time startup scrub,
+  which may clean non-pinned messages that are not stored as active message IDs.
 - Map screenshots use an Explv zoom-10 crop, which corresponds to a `16x16`
   game-tile area. The image is enlarged with nearest-neighbor scaling before
   compositing the matching impling asset.
