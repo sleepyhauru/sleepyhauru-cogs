@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -68,6 +69,8 @@ SCREENSHOT_WORKER_COUNT = 4
 SCREENSHOT_QUEUE_SIZE = 128
 MAINTENANCE_WORKER_COUNT = 1
 MAINTENANCE_QUEUE_SIZE = 256
+ACCESS_ROLE_REASON = "ImplingFinder access reaction"
+CUSTOM_EMOJI_RE = re.compile(r"^<(a?):([A-Za-z0-9_]+):(\d+)>$")
 
 
 def _display_impling_name(name: str) -> str:
@@ -123,6 +126,7 @@ class ImplingFinder(commands.Cog):
             announce_existing=False,
             puro_enabled=False,
             puro_channel=None,
+            access_reactions={},
         )
         self.config.register_global(seen={}, active_messages={})
 
@@ -1428,6 +1432,45 @@ class ImplingFinder(commands.Cog):
         except (TypeError, ValueError):
             return None
 
+    def _access_emoji_key(self, emoji: Any) -> str:
+        emoji_id = getattr(emoji, "id", None)
+        if emoji_id is not None:
+            prefix = "a" if bool(getattr(emoji, "animated", False)) else ""
+            name = str(getattr(emoji, "name", "")).strip()
+            if not name:
+                return ""
+            return f"<{prefix}:{name}:{int(emoji_id)}>"
+
+        value = str(getattr(emoji, "name", emoji)).strip()
+        match = CUSTOM_EMOJI_RE.match(value)
+        if match is None:
+            return value
+        prefix = "a" if match.group(1) else ""
+        return f"<{prefix}:{match.group(2)}:{match.group(3)}>"
+
+    def _normalize_access_reactions(self, mappings: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+        normalized: dict[str, dict[str, str]] = {}
+        for message_id, emoji_roles in dict(mappings or {}).items():
+            try:
+                message_key = str(int(message_id))
+            except (TypeError, ValueError):
+                continue
+            clean_emoji_roles: dict[str, str] = {}
+            for emoji, role_id in dict(emoji_roles or {}).items():
+                emoji_key = self._access_emoji_key(emoji)
+                if not emoji_key:
+                    continue
+                try:
+                    clean_emoji_roles[emoji_key] = str(int(role_id))
+                except (TypeError, ValueError):
+                    continue
+            if clean_emoji_roles:
+                normalized[message_key] = clean_emoji_roles
+        return normalized
+
+    def _role_mention(self, role_id: str) -> str:
+        return f"<@&{int(role_id)}>"
+
     def _feed_channels_for_settings(
         self,
         settings: Mapping[str, Any],
@@ -2341,6 +2384,79 @@ class ImplingFinder(commands.Cog):
             await ctx.send(f"{channel.mention} was not configured.")
             return
         await ctx.send(f"Removed Impling Finder routing for {channel.mention}.")
+
+    @implingset.group(name="access", invoke_without_command=True)
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_access(self, ctx: commands.Context) -> None:
+        """Configure reaction role access for existing impling access messages."""
+        await self.implingset_access_list(ctx)
+
+    @implingset_access.command(name="add")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_access_add(
+        self,
+        ctx: commands.Context,
+        message_id: int,
+        emoji: str,
+        role: discord.Role,
+    ) -> None:
+        """Map a reaction on an existing access message to a role."""
+        message_key = str(int(message_id))
+        emoji_key = self._access_emoji_key(emoji)
+        if not emoji_key:
+            await ctx.send("Provide a valid emoji.")
+            return
+
+        async with self.config.guild(ctx.guild).access_reactions() as access_reactions:
+            access_reactions.setdefault(message_key, {})[emoji_key] = str(int(role.id))
+
+        role_display = getattr(role, "mention", self._role_mention(str(role.id)))
+        await ctx.send(f"Reaction `{emoji_key}` on message `{message_key}` will manage {role_display}.")
+
+    @implingset_access.command(name="remove")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_access_remove(
+        self,
+        ctx: commands.Context,
+        message_id: int,
+        emoji: str,
+    ) -> None:
+        """Remove one access reaction mapping."""
+        message_key = str(int(message_id))
+        emoji_key = self._access_emoji_key(emoji)
+
+        async with self.config.guild(ctx.guild).access_reactions() as access_reactions:
+            message_mappings = access_reactions.get(message_key)
+            if not isinstance(message_mappings, dict) or emoji_key not in message_mappings:
+                await ctx.send(f"No access reaction `{emoji_key}` is configured for message `{message_key}`.")
+                return
+            message_mappings.pop(emoji_key, None)
+            if not message_mappings:
+                access_reactions.pop(message_key, None)
+
+        await ctx.send(f"Removed access reaction `{emoji_key}` from message `{message_key}`.")
+
+    @implingset_access.command(name="list")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_access_list(self, ctx: commands.Context) -> None:
+        """List configured access reaction mappings."""
+        raw_access = await self.config.guild(ctx.guild).access_reactions()
+        access_reactions = self._normalize_access_reactions(raw_access)
+        if not access_reactions:
+            await ctx.send("No access reactions configured.")
+            return
+
+        lines = ["Access reactions:"]
+        for message_id in sorted(access_reactions, key=int):
+            for emoji_key, role_id in sorted(access_reactions[message_id].items()):
+                lines.append(
+                    f"- message `{message_id}` `{emoji_key}` -> {self._role_mention(role_id)}"
+                )
+        await ctx.send("\n".join(lines))
 
     @implingset.command(name="list")
     @commands.guild_only()

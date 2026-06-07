@@ -31,6 +31,9 @@ def install_stubs():
         class Member:
             pass
 
+        class Role:
+            pass
+
         class User:
             pass
 
@@ -80,6 +83,12 @@ def install_stubs():
                 self.id = id
                 ext = "gif" if animated else "png"
                 self.url = f"https://cdn.discordapp.com/emojis/{id or 0}.{ext}"
+
+            def __str__(self):
+                if self.id is None:
+                    return self.name
+                prefix = "a" if self.animated else ""
+                return f"<{prefix}:{self.name}:{self.id}>"
 
             @classmethod
             def from_str(cls, value):
@@ -131,6 +140,7 @@ def install_stubs():
         discord.Message = Message
         discord.Attachment = Attachment
         discord.Member = Member
+        discord.Role = Role
         discord.User = User
         discord.VoiceState = VoiceState
         discord.Embed = Embed
@@ -389,7 +399,16 @@ def install_stubs():
 
                     return subwrap
 
+                def subgroup_decorator(*dargs, **dkwargs):
+                    def subwrap(subfunc):
+                        subfunc.command = subcommand_decorator
+                        subfunc.group = subgroup_decorator
+                        return subfunc
+
+                    return subwrap
+
                 func.command = subcommand_decorator
+                func.group = subgroup_decorator
                 return func
 
             return wrap

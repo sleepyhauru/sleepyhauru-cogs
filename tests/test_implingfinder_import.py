@@ -18,6 +18,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cog.config._guild_defaults["max_age_seconds"], 900)
         self.assertFalse(cog.config._guild_defaults["puro_enabled"])
         self.assertIsNone(cog.config._guild_defaults["puro_channel"])
+        self.assertEqual(cog.config._guild_defaults["access_reactions"], {})
         self.assertEqual(cog.config._global_store["seen"], {})
         self.assertEqual(cog.config._global_store["active_messages"], {})
 
@@ -529,6 +530,50 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
                 "Puro-Puro impling posts are now `True`.",
                 "#puro-puro will receive Puro-Puro impling posts.",
             ],
+        )
+
+    async def test_access_commands_store_list_and_remove_mapping(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+        role = types.SimpleNamespace(id=987, mention="@Crystal", name="Crystal")
+
+        await cog.implingset_access_add(ctx, 555, "🦋", role)
+        await cog.implingset_access_list(ctx)
+        await cog.implingset_access_remove(ctx, 555, "🦋")
+
+        self.assertEqual(await cog.config.guild(guild).access_reactions(), {})
+        self.assertEqual(
+            replies,
+            [
+                "Reaction `🦋` on message `555` will manage @Crystal.",
+                "Access reactions:\n- message `555` `🦋` -> <@&987>",
+                "Removed access reaction `🦋` from message `555`.",
+            ],
+        )
+
+    async def test_access_command_normalizes_custom_emoji_mapping(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+
+        async def send(_message):
+            return None
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+        role = types.SimpleNamespace(id=988, mention="@Dragon", name="Dragon")
+
+        await cog.implingset_access_add(ctx, "556", "<:dragon:123456789012345678>", role)
+
+        self.assertEqual(
+            await cog.config.guild(guild).access_reactions(),
+            {"556": {"<:dragon:123456789012345678>": "988"}},
         )
 
     async def test_embed_uses_spawned_title_as_map_link_without_coordinate_field(self):
