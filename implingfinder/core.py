@@ -26,6 +26,10 @@ EXPLV_GAME_TILE_PIXELS_AT_MAX_ZOOM = 32
 EXPLV_X_ORIGIN = 960
 EXPLV_Y_ORIGIN = 6208
 EXPLV_PIXEL_Y_ORIGIN = 364_544
+PURO_PURO_X_MIN = 2560
+PURO_PURO_X_MAX = 2620
+PURO_PURO_Y_MIN = 4290
+PURO_PURO_Y_MAX = 4350
 
 
 @dataclass(frozen=True)
@@ -231,17 +235,14 @@ def collapse_duplicate_sightings(spawns: Iterable[ImplingSpawn]) -> list[Impling
 
 
 def resolve_location_name(spawn: ImplingSpawn, labels: Iterable[MapLabel]) -> str:
-    same_plane = [label for label in labels if label.plane == spawn.plane]
-    if not same_plane:
+    mapped_areas = list(labels)
+    if not mapped_areas:
         return "Unknown area"
 
     def distance_squared(label: MapLabel) -> int:
         return (label.xcoord - spawn.xcoord) ** 2 + (label.ycoord - spawn.ycoord) ** 2
 
-    same_region = [label for label in same_plane if label.region_id == spawn.region_id]
-    if same_region:
-        return min(same_region, key=distance_squared).name
-    return f"Near {min(same_plane, key=distance_squared).name}"
+    return min(mapped_areas, key=distance_squared).name
 
 
 def matching_channel_ids(channels: Mapping[str, Sequence[int]], spawn: ImplingSpawn) -> list[int]:
@@ -254,6 +255,30 @@ def matching_channel_ids(channels: Mapping[str, Sequence[int]], spawn: ImplingSp
         except (TypeError, ValueError):
             continue
     return channel_ids
+
+
+def is_puro_puro_spawn(spawn: ImplingSpawn) -> bool:
+    return (
+        PURO_PURO_X_MIN <= spawn.xcoord <= PURO_PURO_X_MAX
+        and PURO_PURO_Y_MIN <= spawn.ycoord <= PURO_PURO_Y_MAX
+    )
+
+
+def routed_channel_ids(
+    channels: Mapping[str, Sequence[int]],
+    spawn: ImplingSpawn,
+    *,
+    puro_enabled: bool = False,
+    puro_channel_id: Any = None,
+) -> list[int]:
+    if is_puro_puro_spawn(spawn):
+        if not puro_enabled:
+            return []
+        try:
+            return [int(puro_channel_id)]
+        except (TypeError, ValueError):
+            return []
+    return matching_channel_ids(channels, spawn)
 
 
 def select_unseen_spawns(

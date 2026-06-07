@@ -30,11 +30,11 @@ from .core import (
     collapse_duplicate_sightings,
     explv_tiles_for_crop,
     filter_stale_spawns,
-    matching_channel_ids,
     npc_ids_for_types,
     parse_backend_payload,
     parse_impling_types,
     resolve_location_name,
+    routed_channel_ids,
     sanitize_endpoint_url,
     select_unseen_spawns,
     sighting_key_from_legacy_dedupe_key,
@@ -51,7 +51,7 @@ MAX_BACKOFF_SECONDS = 300
 MANUAL_RECENT_MAX_COUNT = 25
 CONFIG_IDENTIFIER = 0x1A9D1F1644
 COG_DIR = Path(__file__).resolve().parent
-MAP_LABELS_PATH = COG_DIR / "data" / "map_labels.json"
+AREAS_PATH = COG_DIR / "data" / "areas.json"
 IMPLING_ASSET_DIR = COG_DIR / "assets"
 MAP_IMAGE_SIZE = 512
 MAP_TILE_ZOOM = 10
@@ -121,6 +121,8 @@ class ImplingFinder(commands.Cog):
             id_endpoint=DEFAULT_ID_ENDPOINT,
             screenshots=False,
             announce_existing=False,
+            puro_enabled=False,
+            puro_channel=None,
         )
         self.config.register_global(seen={}, active_messages={})
 
@@ -130,7 +132,7 @@ class ImplingFinder(commands.Cog):
         self._failure_counts: dict[int, int] = {}
         self._backoff_until: dict[int, float] = {}
         self._pillow_warning_logged = False
-        self._map_labels = self._load_map_labels()
+        self._location_areas = self._load_location_areas()
         self.metrics_store: Optional[MetricsStore] = None
         self.dashboard: Optional[DashboardServer] = None
         self._started_at = time.time()
@@ -439,10 +441,11 @@ class ImplingFinder(commands.Cog):
             return None
 
         channels = self._normalize_channels(settings.get("channels", {}))
-        if not channels:
+        feed_channels = self._feed_channels_for_settings(settings, channels)
+        if not feed_channels:
             return None
 
-        await self._clean_feed_channels_on_startup(guild, channels)
+        await self._clean_feed_channels_on_startup(guild, feed_channels)
 
         interval = max(
             MIN_POLL_INTERVAL_SECONDS,
@@ -559,7 +562,9 @@ class ImplingFinder(commands.Cog):
         unique_spawns = collapse_duplicate_sightings(fresh_spawns)
         duplicate_count = max(0, len(fresh_spawns) - len(unique_spawns))
         routed_spawns = [
-            spawn for spawn in reversed(unique_spawns) if matching_channel_ids(channels, spawn)
+            spawn
+            for spawn in reversed(unique_spawns)
+            if self._routed_channel_ids(settings, channels, spawn)
         ]
         guild_id = str(guild.id)
         guild_name = str(getattr(guild, "name", guild.id))
@@ -595,7 +600,7 @@ class ImplingFinder(commands.Cog):
 
             send_tasks = []
             for spawn in to_announce:
-                for channel_id in matching_channel_ids(channels, spawn):
+                for channel_id in self._routed_channel_ids(settings, channels, spawn):
                     channel = guild.get_channel(channel_id)
                     if channel is None:
                         log.warning(
@@ -623,7 +628,7 @@ class ImplingFinder(commands.Cog):
 
         self._schedule_post_poll_maintenance(
             guild,
-            channels,
+            self._feed_channels_for_settings(settings, channels),
             current_sighting_keys,
             current_sighting_aliases,
             current_spawns_by_key,
@@ -1417,6 +1422,37 @@ class ImplingFinder(commands.Cog):
                 normalized[clean_channel_id] = clean_npc_ids
         return normalized
 
+    def _normalize_puro_channel(self, settings: Mapping[str, Any]) -> Optional[str]:
+        try:
+            return str(int(settings.get("puro_channel")))
+        except (TypeError, ValueError):
+            return None
+
+    def _feed_channels_for_settings(
+        self,
+        settings: Mapping[str, Any],
+        channels: Mapping[str, list[int]],
+    ) -> dict[str, list[int]]:
+        feed_channels = dict(channels)
+        if bool(settings.get("puro_enabled", False)):
+            puro_channel = self._normalize_puro_channel(settings)
+            if puro_channel is not None:
+                feed_channels.setdefault(puro_channel, [])
+        return feed_channels
+
+    def _routed_channel_ids(
+        self,
+        settings: Mapping[str, Any],
+        channels: Mapping[str, list[int]],
+        spawn: ImplingSpawn,
+    ) -> list[int]:
+        return routed_channel_ids(
+            channels,
+            spawn,
+            puro_enabled=bool(settings.get("puro_enabled", False)),
+            puro_channel_id=self._normalize_puro_channel(settings),
+        )
+
     async def _fetch_spawns(self, endpoint: str) -> list[ImplingSpawn]:
         session = await self._get_session()
         try:
@@ -1476,30 +1512,33 @@ class ImplingFinder(commands.Cog):
                 guild.id,
             )
 
-    def _load_map_labels(self) -> list[MapLabel]:
+    def _load_location_areas(self) -> list[MapLabel]:
         try:
-            raw_labels = json.loads(MAP_LABELS_PATH.read_text(encoding="utf-8"))
+            raw_data = json.loads(AREAS_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            log.exception("Impling Finder could not load bundled Explv map labels")
+            log.exception("Impling Finder could not load bundled mapped area labels")
             return []
 
-        labels: list[MapLabel] = []
+        raw_labels = raw_data.get("locations", []) if isinstance(raw_data, Mapping) else raw_data
+        areas: list[MapLabel] = []
         for item in raw_labels:
             try:
-                labels.append(
+                coords = item["coords"]
+                xcoord, ycoord, plane = coords[:3]
+                areas.append(
                     MapLabel(
                         name=str(item["name"]),
-                        xcoord=int(item["x"]),
-                        ycoord=int(item["y"]),
-                        plane=int(item["plane"]),
+                        xcoord=int(xcoord),
+                        ycoord=int(ycoord),
+                        plane=int(plane),
                     )
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-        return labels
+        return areas
 
     def _location_for_spawn(self, spawn: ImplingSpawn) -> str:
-        return resolve_location_name(spawn, self._map_labels)
+        return resolve_location_name(spawn, self._location_areas)
 
     def _display_name_for_spawn(self, spawn: ImplingSpawn) -> str:
         return _display_impling_name(spawn.impling_name)
@@ -2167,17 +2206,22 @@ class ImplingFinder(commands.Cog):
     async def _settings_message(self, guild: discord.Guild, prefix: str) -> str:
         settings = await self.config.guild(guild).all()
         channels = self._normalize_channels(settings.get("channels", {}))
+        puro_channel = self._normalize_puro_channel(settings)
+        puro_channel_display = f"<#{puro_channel}>" if puro_channel else "none"
         lines = [
             "Impling Finder settings",
             f"Enabled: `{bool(settings.get('enabled'))}`",
             f"Poll interval: `{settings.get('poll_interval', DEFAULT_POLL_INTERVAL_SECONDS)}s`",
             f"Max age: `{settings.get('max_age_seconds', DEFAULT_MAX_AGE_SECONDS)}s`",
             f"Map screenshots: `{bool(settings.get('screenshots'))}`",
+            f"Puro-Puro: `{bool(settings.get('puro_enabled', False))}`",
+            f"Puro-Puro channel: `{puro_channel_display}`",
             f"Endpoint: `{settings.get('endpoint', DEFAULT_ENDPOINT)}`",
         ]
         if not channels:
             lines.append("Channels: `none`")
-            lines.append(f"Next: run `{prefix}implingset addchannel #channel dragon lucky`.")
+            if not self._feed_channels_for_settings(settings, channels):
+                lines.append(f"Next: run `{prefix}implingset addchannel #channel dragon lucky`.")
             return "\n".join(lines)
 
         lines.append("Channels:")
@@ -2256,6 +2300,31 @@ class ImplingFinder(commands.Cog):
             channels[str(channel.id)] = npc_ids
         names = ", ".join(type_keys)
         await ctx.send(f"{channel.mention} will receive `{names}` impling posts.")
+
+    @implingset.command(name="puro")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_puro(self, ctx: commands.Context, value: str) -> None:
+        """Enable or disable Puro-Puro impling posts."""
+        try:
+            enabled = self._parse_bool(value)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await self.config.guild(ctx.guild).puro_enabled.set(enabled)
+        await ctx.send(f"Puro-Puro impling posts are now `{enabled}`.")
+
+    @implingset.command(name="purochannel")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_purochannel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel,
+    ) -> None:
+        """Set the dedicated Puro-Puro impling feed channel."""
+        await self.config.guild(ctx.guild).puro_channel.set(str(channel.id))
+        await ctx.send(f"{channel.mention} will receive Puro-Puro impling posts.")
 
     @implingset.command(name="removechannel")
     @commands.guild_only()

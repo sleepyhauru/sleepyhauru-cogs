@@ -16,6 +16,8 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(module.DEFAULT_POLL_INTERVAL_SECONDS, 5)
         self.assertEqual(cog.config._guild_defaults["poll_interval"], 5)
         self.assertEqual(cog.config._guild_defaults["max_age_seconds"], 900)
+        self.assertFalse(cog.config._guild_defaults["puro_enabled"])
+        self.assertIsNone(cog.config._guild_defaults["puro_channel"])
         self.assertEqual(cog.config._global_store["seen"], {})
         self.assertEqual(cog.config._global_store["active_messages"], {})
 
@@ -504,6 +506,31 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await cog.config.guild(guild).poll_interval(), 5)
         self.assertEqual(replies, ["Polling interval set to `5s`."])
 
+    async def test_puro_commands_set_toggle_and_channel(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+        channel = types.SimpleNamespace(id=222, mention="#puro-puro")
+
+        await cog.implingset_puro(ctx, "on")
+        await cog.implingset_purochannel(ctx, channel)
+
+        self.assertTrue(await cog.config.guild(guild).puro_enabled())
+        self.assertEqual(await cog.config.guild(guild).puro_channel(), "222")
+        self.assertEqual(
+            replies,
+            [
+                "Puro-Puro impling posts are now `True`.",
+                "#puro-puro will receive Puro-Puro impling posts.",
+            ],
+        )
+
     async def test_embed_uses_spawned_title_as_map_link_without_coordinate_field(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -766,6 +793,89 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started, 2)
         self.assertEqual(max_in_flight, 2)
 
+    async def test_process_routes_puro_spawn_only_to_puro_channel(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2590,
+            ycoord=4310,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        channels = {
+            111: types.SimpleNamespace(id=111, name="dragon-imps"),
+            222: types.SimpleNamespace(id=222, name="puro-puro"),
+        }
+        guild = types.SimpleNamespace(
+            id=123,
+            name="Impling Hunters",
+            get_channel=lambda channel_id: channels.get(channel_id),
+        )
+        sent = []
+
+        async def send_spawn(_guild, channel, received_spawn, *, screenshots, **_kwargs):
+            sent.append((channel.id, received_spawn, screenshots))
+            return types.SimpleNamespace(id=900 + channel.id)
+
+        cog._send_spawn_to_channel = send_spawn
+
+        await cog._process_polled_spawns(
+            guild,
+            {
+                "max_age_seconds": 900,
+                "announce_existing": True,
+                "screenshots": False,
+                "puro_enabled": True,
+                "puro_channel": "222",
+            },
+            {"111": [1644]},
+            [spawn],
+        )
+
+        self.assertEqual(sent, [(222, spawn, False)])
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {spawn.sighting_key: {"222": self._active_message_record(spawn, 1122)}}},
+        )
+
+    async def test_process_skips_puro_spawn_when_puro_is_disabled(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=1644,
+            world=489,
+            xcoord=2590,
+            ycoord=4310,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda _channel_id: object())
+        sent = []
+
+        async def send_spawn(_guild, _channel, received_spawn, *, screenshots, **_kwargs):
+            sent.append(received_spawn)
+            return types.SimpleNamespace(id=333)
+
+        cog._send_spawn_to_channel = send_spawn
+
+        await cog._process_polled_spawns(
+            guild,
+            {
+                "max_age_seconds": 900,
+                "announce_existing": True,
+                "screenshots": False,
+                "puro_enabled": False,
+                "puro_channel": "222",
+            },
+            {"111": [1644]},
+            [spawn],
+        )
+
+        self.assertEqual(sent, [])
+        self.assertEqual(cog.config._global_store["active_messages"], {})
+
     async def test_process_cleans_feed_channel_when_no_live_spawns(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -805,6 +915,28 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(deleted, [10])
         self.assertEqual(channel.history_limit, module.FEED_CLEANUP_HISTORY_LIMIT)
+
+    async def test_process_includes_enabled_puro_channel_in_feed_cleanup(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters", get_channel=lambda _channel_id: None)
+
+        await cog._process_polled_spawns(
+            guild,
+            {
+                "max_age_seconds": 900,
+                "announce_existing": False,
+                "screenshots": False,
+                "puro_enabled": True,
+                "puro_channel": "222",
+            },
+            {"111": [1644]},
+            [],
+        )
+
+        job = cog._maintenance_queue.get_nowait()
+        self.assertEqual(job.channels, {"111": [1644], "222": []})
+        cog._maintenance_queue.task_done()
 
     async def test_feed_cleanup_keeps_recent_despawn_notice(self):
         module = load_module("implingfinder.implingfinder")

@@ -15,6 +15,7 @@ from implingfinder.core import (
     matching_channel_ids,
     parse_backend_payload,
     parse_discovered_epoch,
+    routed_channel_ids,
     parse_impling_types,
     region_id_from_xy,
     resolve_location_name,
@@ -114,33 +115,22 @@ class ImplingFinderCoreTest(unittest.TestCase):
             [separate, newer],
         )
 
-    def test_resolve_location_name_prefers_same_region_then_nearest_label(self):
+    def test_resolve_location_name_uses_nearest_mapped_area(self):
         spawn = ImplingSpawn(
-            npcid=1644,
-            world=489,
-            xcoord=3210,
-            ycoord=3420,
-            plane=0,
-            discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
-        )
-        labels = [
-            MapLabel("Varrock", 3211, 3450, 0),
-            MapLabel("Grand Exchange", 3164, 3487, 0),
-            MapLabel("Upstairs", 3210, 3420, 1),
-        ]
-
-        self.assertEqual(resolve_location_name(spawn, labels), "Varrock")
-
-        distant_spawn = ImplingSpawn(
             npcid=1644,
             world=489,
             xcoord=3000,
             ycoord=3200,
-            plane=0,
+            plane=1,
             discovered=datetime.fromtimestamp(1_715_000_000, timezone.utc),
         )
-        self.assertEqual(resolve_location_name(distant_spawn, labels), "Near Varrock")
-        self.assertEqual(resolve_location_name(distant_spawn, []), "Unknown area")
+        labels = [
+            MapLabel("Same-plane distant", 2500, 3200, 1),
+            MapLabel("Closest mapped area", 3002, 3200, 0),
+        ]
+
+        self.assertEqual(resolve_location_name(spawn, labels), "Closest mapped area")
+        self.assertEqual(resolve_location_name(spawn, []), "Unknown area")
 
     def test_explv_chunk_tile_and_icon_center_match_exact_game_tile(self):
         spawn = ImplingSpawn(
@@ -230,6 +220,53 @@ class ImplingFinderCoreTest(unittest.TestCase):
         }
 
         self.assertEqual(matching_channel_ids(channels, spawn), [111])
+
+    def test_routed_channel_ids_routes_puro_only_to_dedicated_channel(self):
+        puro_spawn = ImplingSpawn(
+            1644,
+            489,
+            2590,
+            4310,
+            0,
+            datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        normal_spawn = ImplingSpawn(
+            1644,
+            489,
+            2914,
+            3323,
+            0,
+            datetime.fromtimestamp(1_715_000_000, timezone.utc),
+        )
+        channels = {"111": [1644], "333": [7233]}
+
+        self.assertEqual(
+            routed_channel_ids(
+                channels,
+                puro_spawn,
+                puro_enabled=True,
+                puro_channel_id="222",
+            ),
+            [222],
+        )
+        self.assertEqual(
+            routed_channel_ids(
+                channels,
+                puro_spawn,
+                puro_enabled=False,
+                puro_channel_id="222",
+            ),
+            [],
+        )
+        self.assertEqual(
+            routed_channel_ids(
+                channels,
+                normal_spawn,
+                puro_enabled=True,
+                puro_channel_id="222",
+            ),
+            [111],
+        )
 
     def test_build_map_url_uses_explv_coordinates(self):
         spawn = ImplingSpawn(

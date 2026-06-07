@@ -50,6 +50,13 @@ Enable polling:
 [p]implingset enable
 ```
 
+Send Puro-Puro sightings to a dedicated channel:
+
+```text
+[p]implingset purochannel #puro-puro
+[p]implingset puro true
+```
+
 ## Commands
 
 - `[p]implingset enable`
@@ -57,6 +64,8 @@ Enable polling:
 - `[p]implingset interval <seconds>` - minimum `5`, default `5`
 - `[p]implingset maxage <seconds>` - default `900`
 - `[p]implingset addchannel <#channel> <types...>`
+- `[p]implingset puro <true|false>`
+- `[p]implingset purochannel <#channel>`
 - `[p]implingset removechannel <#channel>`
 - `[p]implingset list`
 - `[p]implingset screenshots <true|false>`
@@ -102,6 +111,8 @@ After each successful backend response, new live sightings are posted before des
 
 On cog load or reload, the cog also performs a one-time feed scrub against stored active message IDs so configured feed channels are cleaned promptly. The authoritative despawn pass still requires a successful backend response before tracked active messages are deleted or cleared.
 
+Puro-Puro sightings are disabled by default. When enabled and assigned to a Puro-Puro channel, sightings inside the Puro-Puro coordinate box post only to that dedicated channel and do not duplicate into normal type-routed channels. If Puro-Puro is disabled or no Puro-Puro channel is configured, those sightings are skipped.
+
 For competitive hunting, set the interval to the minimum:
 
 ```text
@@ -115,7 +126,7 @@ finishes.
 
 ## Location and Asset Sources
 
-Discord posts display a human-readable location resolved from bundled [Explv map labels](https://github.com/Explv/Explv.github.io/blob/master/public/resources/map_labels.json). A label in the same region and plane is preferred; otherwise the nearest label is displayed with a `Near` prefix. If no label is available, the location is shown as `Unknown area`.
+Discord posts display a human-readable location resolved from bundled mapped areas in `implingfinder/data/areas.json`. The resolver matches the old ImplingFinder script behavior: it returns the closest mapped area by x/y distance, ignoring plane and the optional `size` field. If no mapped areas are available, the location is shown as `Unknown area`.
 
 The chunk background uses [Explv OSRS map tiles](https://github.com/Explv/osrs_map_tiles). Matching transparent impling images are bundled from the [Old School RuneScape Wiki](https://oldschool.runescape.wiki/).
 
