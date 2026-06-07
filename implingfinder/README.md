@@ -57,6 +57,28 @@ Send Puro-Puro sightings to a dedicated channel:
 [p]implingset puro true
 ```
 
+## Private Channel Access
+
+If your impling spawn channels are private, keep using your existing access
+message and configure its reactions to manage the roles that unlock those
+channels:
+
+```text
+[p]implingset access add <message_id> <emoji> @CrystalImplings
+[p]implingset access add <message_id> <emoji> @DragonImplings
+[p]implingset access add <message_id> <emoji> @LuckyImplings
+```
+
+When a user adds one of those reactions, the cog grants the configured role.
+When they remove the reaction, the cog removes the role. Channel visibility
+still comes from Discord role permissions, so configure each private channel to
+allow the matching role.
+
+The bot needs `Manage Roles`, and the bot's highest role must be above the
+roles it manages. The cog does not backfill old reactions; users who already
+reacted before setup need to remove and re-add the reaction, or have the role
+assigned manually once.
+
 ## Commands
 
 - `[p]implingset enable`
@@ -71,6 +93,9 @@ Send Puro-Puro sightings to a dedicated channel:
 - `[p]implingset screenshots <true|false>`
 - `[p]implingset endpoint <url>` - must be `https`
 - `[p]implingset resetendpoint`
+- `[p]implingset access add <message_id> <emoji> <role>`
+- `[p]implingset access remove <message_id> <emoji>`
+- `[p]implingset access list`
 - `[p]implingset clearseen`
 - `[p]implingrecent [type=all] [count=10]`
 
