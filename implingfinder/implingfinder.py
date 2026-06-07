@@ -1450,13 +1450,21 @@ class ImplingFinder(commands.Cog):
 
     def _normalize_access_reactions(self, mappings: Mapping[str, Any]) -> dict[str, dict[str, str]]:
         normalized: dict[str, dict[str, str]] = {}
-        for message_id, emoji_roles in dict(mappings or {}).items():
+        try:
+            mapping_items = dict(mappings or {}).items()
+        except (TypeError, ValueError):
+            return normalized
+        for message_id, emoji_roles in mapping_items:
             try:
                 message_key = str(int(message_id))
             except (TypeError, ValueError):
                 continue
             clean_emoji_roles: dict[str, str] = {}
-            for emoji, role_id in dict(emoji_roles or {}).items():
+            try:
+                emoji_role_items = dict(emoji_roles or {}).items()
+            except (TypeError, ValueError):
+                continue
+            for emoji, role_id in emoji_role_items:
                 emoji_key = self._access_emoji_key(emoji)
                 if not emoji_key:
                     continue
@@ -2409,8 +2417,11 @@ class ImplingFinder(commands.Cog):
             await ctx.send("Provide a valid emoji.")
             return
 
-        async with self.config.guild(ctx.guild).access_reactions() as access_reactions:
-            access_reactions.setdefault(message_key, {})[emoji_key] = str(int(role.id))
+        access_reactions = self._normalize_access_reactions(
+            await self.config.guild(ctx.guild).access_reactions()
+        )
+        access_reactions.setdefault(message_key, {})[emoji_key] = str(int(role.id))
+        await self.config.guild(ctx.guild).access_reactions.set(access_reactions)
 
         role_display = getattr(role, "mention", self._role_mention(str(role.id)))
         await ctx.send(f"Reaction `{emoji_key}` on message `{message_key}` will manage {role_display}.")
@@ -2428,14 +2439,17 @@ class ImplingFinder(commands.Cog):
         message_key = str(int(message_id))
         emoji_key = self._access_emoji_key(emoji)
 
-        async with self.config.guild(ctx.guild).access_reactions() as access_reactions:
-            message_mappings = access_reactions.get(message_key)
-            if not isinstance(message_mappings, dict) or emoji_key not in message_mappings:
-                await ctx.send(f"No access reaction `{emoji_key}` is configured for message `{message_key}`.")
-                return
-            message_mappings.pop(emoji_key, None)
-            if not message_mappings:
-                access_reactions.pop(message_key, None)
+        access_reactions = self._normalize_access_reactions(
+            await self.config.guild(ctx.guild).access_reactions()
+        )
+        message_mappings = access_reactions.get(message_key)
+        if not isinstance(message_mappings, dict) or emoji_key not in message_mappings:
+            await ctx.send(f"No access reaction `{emoji_key}` is configured for message `{message_key}`.")
+            return
+        message_mappings.pop(emoji_key, None)
+        if not message_mappings:
+            access_reactions.pop(message_key, None)
+        await self.config.guild(ctx.guild).access_reactions.set(access_reactions)
 
         await ctx.send(f"Removed access reaction `{emoji_key}` from message `{message_key}`.")
 

@@ -558,6 +558,17 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_access_reaction_defaults_are_isolated_per_guild(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        first_guild = types.SimpleNamespace(id=123)
+        second_guild = types.SimpleNamespace(id=456)
+
+        async with cog.config.guild(first_guild).access_reactions() as access_reactions:
+            access_reactions["555"] = {"🦋": "987"}
+
+        self.assertEqual(await cog.config.guild(second_guild).access_reactions(), {})
+
     async def test_access_command_normalizes_custom_emoji_mapping(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -575,6 +586,68 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             await cog.config.guild(guild).access_reactions(),
             {"556": {"<:dragon:123456789012345678>": "988"}},
         )
+
+    async def test_access_list_ignores_malformed_config_entries(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+        await cog.config.guild(guild).access_reactions.set({"555": "bad-shape"})
+
+        await cog.implingset_access_list(ctx)
+
+        self.assertEqual(replies, ["No access reactions configured."])
+
+    async def test_access_add_replaces_malformed_message_mapping(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+        role = types.SimpleNamespace(id=987, mention="@Crystal", name="Crystal")
+        await cog.config.guild(guild).access_reactions.set({"555": "bad-shape"})
+
+        await cog.implingset_access_add(ctx, 555, "🦋", role)
+
+        self.assertEqual(await cog.config.guild(guild).access_reactions(), {"555": {"🦋": "987"}})
+        self.assertEqual(replies, ["Reaction `🦋` on message `555` will manage @Crystal."])
+
+    async def test_access_remove_normalizes_config_and_removes_mapping(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+        await cog.config.guild(guild).access_reactions.set(
+            {
+                555: {
+                    "🦋": 987,
+                    "<:dragon:123456789012345678>": 988,
+                },
+                556: "bad-shape",
+            }
+        )
+
+        await cog.implingset_access_remove(ctx, 555, "🦋")
+
+        self.assertEqual(
+            await cog.config.guild(guild).access_reactions(),
+            {"555": {"<:dragon:123456789012345678>": "988"}},
+        )
+        self.assertEqual(replies, ["Removed access reaction `🦋` from message `555`."])
 
     async def test_embed_uses_spawned_title_as_map_link_without_coordinate_field(self):
         module = load_module("implingfinder.implingfinder")

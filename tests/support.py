@@ -1,3 +1,4 @@
+import copy
 import importlib
 import sys
 import types
@@ -331,7 +332,7 @@ def install_stubs():
             def guild(self, guild):
                 guild_id = getattr(guild, "id", guild)
                 if guild_id not in self._guild_store:
-                    self._guild_store[guild_id] = dict(self._guild_defaults)
+                    self._guild_store[guild_id] = copy.deepcopy(self._guild_defaults)
                 return types.SimpleNamespace(
                     **{
                         key: ConfigValue(self._guild_store[guild_id], key)
