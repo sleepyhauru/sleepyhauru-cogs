@@ -649,6 +649,136 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(replies, ["Removed access reaction `🦋` from message `555`."])
 
+    async def test_access_reaction_add_grants_configured_role(self):
+        module = load_module("implingfinder.implingfinder")
+        calls = []
+
+        class Member:
+            id = 42
+            bot = False
+
+            async def add_roles(self, role, *, reason=None):
+                calls.append(("add", role.id, reason))
+
+            async def remove_roles(self, role, *, reason=None):
+                calls.append(("remove", role.id, reason))
+
+        role = types.SimpleNamespace(id=987)
+        member = Member()
+        guild = types.SimpleNamespace(
+            id=123,
+            get_role=lambda role_id: role if role_id == 987 else None,
+            get_member=lambda user_id: member if user_id == 42 else None,
+        )
+        bot = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == 123 else None,
+        )
+        cog = module.ImplingFinder(bot=bot)
+        await cog.config.guild(guild).access_reactions.set({"555": {"🦋": "987"}})
+        payload = types.SimpleNamespace(
+            guild_id=123,
+            message_id=555,
+            user_id=42,
+            emoji="🦋",
+            member=member,
+        )
+
+        await cog.on_raw_reaction_add(payload)
+
+        self.assertEqual(calls, [("add", 987, "ImplingFinder access reaction")])
+
+    async def test_access_reaction_remove_fetches_member_and_removes_role(self):
+        module = load_module("implingfinder.implingfinder")
+        calls = []
+
+        class Member:
+            id = 42
+            bot = False
+
+            async def add_roles(self, role, *, reason=None):
+                calls.append(("add", role.id, reason))
+
+            async def remove_roles(self, role, *, reason=None):
+                calls.append(("remove", role.id, reason))
+
+        role = types.SimpleNamespace(id=988)
+        member = Member()
+
+        async def fetch_member(user_id):
+            return member if user_id == 42 else None
+
+        guild = types.SimpleNamespace(
+            id=123,
+            get_role=lambda role_id: role if role_id == 988 else None,
+            get_member=lambda _user_id: None,
+            fetch_member=fetch_member,
+        )
+        bot = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == 123 else None,
+        )
+        cog = module.ImplingFinder(bot=bot)
+        await cog.config.guild(guild).access_reactions.set(
+            {"556": {"<:dragon:123456789012345678>": "988"}}
+        )
+        payload = types.SimpleNamespace(
+            guild_id=123,
+            message_id=556,
+            user_id=42,
+            emoji=types.SimpleNamespace(id=123456789012345678, name="dragon", animated=False),
+            member=None,
+        )
+
+        await cog.on_raw_reaction_remove(payload)
+
+        self.assertEqual(calls, [("remove", 988, "ImplingFinder access reaction")])
+
+    async def test_access_reaction_ignores_unconfigured_and_unusable_events(self):
+        module = load_module("implingfinder.implingfinder")
+        calls = []
+
+        class Member:
+            id = 42
+            bot = False
+
+            async def add_roles(self, role, *, reason=None):
+                calls.append(("add", role.id, reason))
+
+            async def remove_roles(self, role, *, reason=None):
+                calls.append(("remove", role.id, reason))
+
+        role = types.SimpleNamespace(id=987)
+        member = Member()
+        bot_member = types.SimpleNamespace(id=43, bot=True, add_roles=self._async_return(None))
+        guild = types.SimpleNamespace(
+            id=123,
+            get_role=lambda role_id: role if role_id == 987 else None,
+            get_member=lambda user_id: {42: member, 43: bot_member}.get(user_id),
+        )
+        bot = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == 123 else None,
+        )
+        cog = module.ImplingFinder(bot=bot)
+        await cog.config.guild(guild).access_reactions.set({"555": {"🦋": "987"}})
+
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(guild_id=123, message_id=999, user_id=42, emoji="🦋", member=member)
+        )
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(guild_id=123, message_id=555, user_id=42, emoji="❌", member=member)
+        )
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(guild_id=123, message_id=555, user_id=43, emoji="🦋", member=bot_member)
+        )
+        await cog.config.guild(guild).access_reactions.set({"555": {"🦋": "123456"}})
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(guild_id=123, message_id=555, user_id=42, emoji="🦋", member=member)
+        )
+
+        self.assertEqual(calls, [])
+
     async def test_embed_uses_spawned_title_as_map_link_without_coordinate_field(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))

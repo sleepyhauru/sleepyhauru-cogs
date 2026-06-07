@@ -1409,6 +1409,110 @@ class ImplingFinder(commands.Cog):
             result = await result
         return bool(result)
 
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload) -> None:
+        await self._handle_access_reaction(payload, add=True)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload) -> None:
+        await self._handle_access_reaction(payload, add=False)
+
+    async def _handle_access_reaction(self, payload, *, add: bool) -> None:
+        guild_id = getattr(payload, "guild_id", None)
+        message_id = getattr(payload, "message_id", None)
+        user_id = getattr(payload, "user_id", None)
+        if guild_id is None or message_id is None or user_id is None:
+            return
+
+        bot_user = getattr(self.bot, "user", None)
+        if getattr(bot_user, "id", None) == user_id:
+            return
+
+        access_reactions = self._normalize_access_reactions(
+            await self.config.guild_from_id(int(guild_id)).access_reactions()
+        )
+        message_mappings = access_reactions.get(str(int(message_id)))
+        if not message_mappings:
+            return
+
+        emoji_key = self._access_emoji_key(getattr(payload, "emoji", ""))
+        role_id = message_mappings.get(emoji_key)
+        if role_id is None:
+            return
+
+        get_guild = getattr(self.bot, "get_guild", None)
+        guild = get_guild(int(guild_id)) if get_guild is not None else None
+        if guild is None:
+            log.warning(
+                "Impling Finder access reaction matched guild %s but the guild was unavailable",
+                guild_id,
+            )
+            return
+
+        member = await self._member_for_access_payload(guild, payload)
+        if member is None or bool(getattr(member, "bot", False)):
+            return
+
+        role = self._role_for_access_reaction(guild, role_id)
+        if role is None:
+            log.warning(
+                "Impling Finder access reaction role %s was unavailable in guild %s",
+                role_id,
+                guild_id,
+            )
+            return
+
+        try:
+            if add:
+                await member.add_roles(role, reason=ACCESS_ROLE_REASON)
+            else:
+                await member.remove_roles(role, reason=ACCESS_ROLE_REASON)
+        except (discord.Forbidden, discord.HTTPException, discord.DiscordException):
+            action = "grant" if add else "remove"
+            log.warning(
+                "Impling Finder failed to %s access role %s for user %s in guild %s",
+                action,
+                role_id,
+                user_id,
+                guild_id,
+                exc_info=True,
+            )
+
+    async def _member_for_access_payload(self, guild, payload):
+        member = getattr(payload, "member", None)
+        if member is not None:
+            return member
+
+        user_id = int(getattr(payload, "user_id"))
+        get_member = getattr(guild, "get_member", None)
+        if get_member is not None:
+            member = get_member(user_id)
+            if member is not None:
+                return member
+
+        fetch_member = getattr(guild, "fetch_member", None)
+        if fetch_member is None:
+            return None
+        try:
+            return await fetch_member(user_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, discord.DiscordException):
+            log.warning(
+                "Impling Finder access reaction member %s was unavailable in guild %s",
+                user_id,
+                getattr(guild, "id", "?"),
+                exc_info=True,
+            )
+            return None
+
+    def _role_for_access_reaction(self, guild, role_id: str):
+        get_role = getattr(guild, "get_role", None)
+        if get_role is None:
+            return None
+        try:
+            return get_role(int(role_id))
+        except (TypeError, ValueError):
+            return None
+
     def _normalize_channels(self, channels: Mapping[str, Any]) -> dict[str, list[int]]:
         normalized: dict[str, list[int]] = {}
         for channel_id, npc_ids in dict(channels or {}).items():
