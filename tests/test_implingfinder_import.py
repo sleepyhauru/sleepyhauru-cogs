@@ -773,9 +773,16 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             types.SimpleNamespace(guild_id=123, message_id=555, user_id=43, emoji="🦋", member=bot_member)
         )
         await cog.config.guild(guild).access_reactions.set({"555": {"🦋": "123456"}})
-        await cog.on_raw_reaction_add(
-            types.SimpleNamespace(guild_id=123, message_id=555, user_id=42, emoji="🦋", member=member)
-        )
+        with self.assertLogs("red.implingfinder", level="WARNING"):
+            await cog.on_raw_reaction_add(
+                types.SimpleNamespace(
+                    guild_id=123,
+                    message_id=555,
+                    user_id=42,
+                    emoji="🦋",
+                    member=member,
+                )
+            )
 
         self.assertEqual(calls, [])
 
