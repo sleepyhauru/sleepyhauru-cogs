@@ -131,6 +131,12 @@ Each sighting is deduplicated by NPC ID, world, plane, and the official OSRS reg
 
 The backend can report the same moving impling several times with slightly different coordinates or timestamps, so the cog keeps the newest row for each region and avoids posting older rows from that region as duplicates.
 
+When a newer backend row arrives for a sighting that is already represented by
+an active Discord post, the cog edits that existing post to show the latest
+world, location, Explv link, and relative discovered time instead of leaving the
+original timestamp visible. If screenshots are enabled, it queues a replacement
+map attachment for the same message.
+
 When a tracked sighting is missing from the fresh sightings in the latest successful backend response, the cog edits the Discord message it posted for that sighting to say the impling despawned, keeps the screenshot in the embed, removes the stored active message ID, and deletes the despawn notice 30 seconds later. Messages are kept for retry if Discord rejects the edit because of permissions or a transient API error.
 
 The bot adds a caught reaction to each spawn post. Any non-bot user who can see

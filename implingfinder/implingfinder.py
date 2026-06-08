@@ -108,6 +108,7 @@ class MaintenanceJob:
     current_sighting_keys: set[str]
     current_sighting_aliases: dict[str, str]
     current_spawns_by_key: dict[str, ImplingSpawn]
+    screenshots: bool
 
 
 class ImplingFinder(commands.Cog):
@@ -259,6 +260,7 @@ class ImplingFinder(commands.Cog):
                     job.current_sighting_keys,
                     job.current_sighting_aliases,
                     job.current_spawns_by_key,
+                    screenshots=job.screenshots,
                 )
             except asyncio.CancelledError:
                 raise
@@ -638,6 +640,7 @@ class ImplingFinder(commands.Cog):
             current_sighting_keys,
             current_sighting_aliases,
             current_spawns_by_key,
+            screenshots=bool(settings.get("screenshots", False)),
         )
 
     async def _send_spawn_job(
@@ -674,6 +677,8 @@ class ImplingFinder(commands.Cog):
         current_sighting_keys: set[str],
         current_sighting_aliases: Mapping[str, str],
         current_spawns_by_key: Mapping[str, ImplingSpawn],
+        *,
+        screenshots: bool,
     ) -> None:
         try:
             self._maintenance_queue.put_nowait(
@@ -683,6 +688,7 @@ class ImplingFinder(commands.Cog):
                     current_sighting_keys=set(current_sighting_keys),
                     current_sighting_aliases=dict(current_sighting_aliases),
                     current_spawns_by_key=dict(current_spawns_by_key),
+                    screenshots=bool(screenshots),
                 )
             )
         except asyncio.QueueFull:
@@ -740,6 +746,8 @@ class ImplingFinder(commands.Cog):
         current_sighting_keys: set[str],
         current_sighting_aliases: Mapping[str, str],
         current_spawns_by_key: Mapping[str, ImplingSpawn],
+        *,
+        screenshots: bool = False,
     ) -> None:
         try:
             await self._delete_missing_active_messages(
@@ -747,6 +755,7 @@ class ImplingFinder(commands.Cog):
                 current_sighting_keys,
                 current_sighting_aliases,
                 current_spawns_by_key,
+                screenshots=screenshots,
             )
             await self._clean_feed_channels_if_due(guild, channels)
         except asyncio.CancelledError:
@@ -774,6 +783,8 @@ class ImplingFinder(commands.Cog):
         current_sighting_keys: set[str],
         current_sighting_aliases: Mapping[str, str],
         current_spawns_by_key: Mapping[str, ImplingSpawn],
+        *,
+        screenshots: bool = False,
     ) -> None:
         guild_key = str(guild.id)
         async with self.config.active_messages() as active_messages:
@@ -800,10 +811,14 @@ class ImplingFinder(commands.Cog):
                             migrated_messages.update(channel_messages)
                             guild_messages.pop(spawn_key, None)
                             target_messages = migrated_messages
-                        self._hydrate_active_message_records(
-                            target_messages,
-                            current_spawns_by_key.get(migrated_key),
-                        )
+                        current_spawn = current_spawns_by_key.get(migrated_key)
+                        if current_spawn is not None:
+                            await self._refresh_current_tracked_messages(
+                                guild,
+                                target_messages,
+                                current_spawn,
+                                screenshots=screenshots,
+                            )
                     else:
                         guild_messages.pop(spawn_key, None)
                     continue
@@ -826,6 +841,119 @@ class ImplingFinder(commands.Cog):
 
             if not guild_messages:
                 active_messages.pop(guild_key, None)
+
+    async def _refresh_current_tracked_messages(
+        self,
+        guild: discord.Guild,
+        channel_messages: dict[Any, Any],
+        spawn: ImplingSpawn,
+        *,
+        screenshots: bool,
+    ) -> None:
+        for channel_id, message_record in list(channel_messages.items()):
+            message_id = self._tracked_message_id(message_record)
+            if message_id is None:
+                channel_messages.pop(channel_id, None)
+                continue
+            if self._active_message_record_matches_spawn(message_record, spawn):
+                channel_messages[channel_id] = self._active_message_record(message_id, spawn)
+                continue
+            if await self._refresh_tracked_message_spawn(
+                guild,
+                channel_id,
+                message_id,
+                spawn,
+                screenshots=screenshots,
+            ):
+                channel_messages[channel_id] = self._active_message_record(message_id, spawn)
+
+    def _active_message_record_matches_spawn(
+        self,
+        message_record: Any,
+        spawn: ImplingSpawn,
+    ) -> bool:
+        if not isinstance(message_record, Mapping):
+            return True
+        try:
+            return (
+                int(message_record["npcid"]) == int(spawn.npcid)
+                and int(message_record["world"]) == int(spawn.world)
+                and int(message_record["xcoord"]) == int(spawn.xcoord)
+                and int(message_record["ycoord"]) == int(spawn.ycoord)
+                and int(message_record["plane"]) == int(spawn.plane)
+                and int(message_record["discovered_epoch"]) == int(spawn.discovered_epoch)
+                and int(message_record["message_updated_epoch"]) == int(spawn.discovered_epoch)
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    async def _refresh_tracked_message_spawn(
+        self,
+        guild: discord.Guild,
+        channel_id: Any,
+        message_id: int,
+        spawn: ImplingSpawn,
+        *,
+        screenshots: bool,
+    ) -> bool:
+        try:
+            clean_channel_id = int(channel_id)
+            clean_message_id = int(message_id)
+        except (TypeError, ValueError):
+            return False
+
+        channel = guild.get_channel(clean_channel_id)
+        if channel is None:
+            log.warning(
+                "Impling Finder cannot refresh active message %s; channel %s is missing",
+                clean_message_id,
+                clean_channel_id,
+            )
+            return False
+
+        try:
+            if hasattr(channel, "get_partial_message"):
+                message = channel.get_partial_message(clean_message_id)
+            else:
+                message = await channel.fetch_message(clean_message_id)
+            permissions = self._bot_permissions(guild, channel)
+            can_embed = permissions is None or getattr(permissions, "embed_links", False)
+            kwargs: dict[str, Any] = {
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if can_embed:
+                kwargs.update(content=None, embed=self._embed_for_spawn(spawn))
+            else:
+                kwargs.update(content=self._content_for_spawn(spawn), embed=None)
+            await message.edit(**kwargs)
+            can_attach = permissions is None or getattr(permissions, "attach_files", False)
+            if screenshots and can_embed and can_attach:
+                self._enqueue_screenshot_edit(
+                    guild,
+                    channel,
+                    message,
+                    spawn,
+                    fetch_ms=None,
+                    fetch_completed_at=None,
+                    process_ms=None,
+                )
+            return True
+        except discord.NotFound:
+            return False
+        except discord.Forbidden:
+            log.warning(
+                "Impling Finder lacks permission to refresh active message %s in channel %s",
+                clean_message_id,
+                clean_channel_id,
+            )
+            return False
+        except discord.HTTPException:
+            log.exception(
+                "Impling Finder failed to refresh active message %s in channel %s",
+                clean_message_id,
+                clean_channel_id,
+            )
+            return False
 
     async def _clear_missing_seen_sightings(
         self,
@@ -865,20 +993,6 @@ class ImplingFinder(commands.Cog):
             return legacy_key
         return None
 
-    def _hydrate_active_message_records(
-        self,
-        channel_messages: dict[Any, Any],
-        spawn: Optional[ImplingSpawn],
-    ) -> None:
-        if spawn is None:
-            return
-        for channel_id, message_record in list(channel_messages.items()):
-            message_id = self._tracked_message_id(message_record)
-            if message_id is None:
-                channel_messages.pop(channel_id, None)
-                continue
-            channel_messages[channel_id] = self._active_message_record(message_id, spawn)
-
     def _tracked_message_id(self, message_record: Any) -> Optional[int]:
         raw_message_id = (
             message_record.get("message_id")
@@ -899,6 +1013,7 @@ class ImplingFinder(commands.Cog):
             "ycoord": int(spawn.ycoord),
             "plane": int(spawn.plane),
             "discovered_epoch": int(spawn.discovered_epoch),
+            "message_updated_epoch": int(spawn.discovered_epoch),
         }
 
     def _spawn_from_active_message_record(

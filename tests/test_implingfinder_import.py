@@ -507,6 +507,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             "ycoord": spawn.ycoord,
             "plane": spawn.plane,
             "discovered_epoch": spawn.discovered_epoch,
+            "message_updated_epoch": spawn.discovered_epoch,
         }
 
     async def _cancel_post_poll_tasks(self, cog):
@@ -1683,6 +1684,122 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded[-1].kind, "attachment")
         self.assertEqual(recorded[-1].outcome, "skipped")
         self.assertEqual(recorded[-1].error_category, "message_despawned")
+
+    async def test_process_refreshes_active_message_when_same_region_sighting_updates(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        old_spawn = module.ImplingSpawn(
+            npcid=8741,
+            world=352,
+            xcoord=3264,
+            ycoord=6109,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_910_000, timezone.utc),
+        )
+        new_spawn = module.ImplingSpawn(
+            npcid=8741,
+            world=352,
+            xcoord=3276,
+            ycoord=6109,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_911_545, timezone.utc),
+        )
+        edited = []
+
+        class PartialMessage:
+            id = 222
+            embeds = []
+
+            async def edit(self, **kwargs):
+                edited.append(kwargs)
+
+        class Channel:
+            id = 111
+            name = "crystal-imps"
+
+            def get_partial_message(self, message_id):
+                self.message_id = message_id
+                return PartialMessage()
+
+        channel = Channel()
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: channel)
+        cog.config._global_store["active_messages"] = {
+            "123": {
+                old_spawn.sighting_key: {
+                    "111": self._active_message_record(old_spawn, 222),
+                }
+            }
+        }
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [8741]},
+            [new_spawn],
+        )
+        await self._wait_post_poll_tasks(cog)
+
+        self.assertEqual(len(edited), 1)
+        self.assertEqual(channel.message_id, 222)
+        edit_kwargs = edited[0]
+        self.assertEqual(edit_kwargs["embed"].title, "Crystal Impling spawned")
+        self.assertEqual(
+            edit_kwargs["embed"].url,
+            "https://explv.github.io/?centreX=3276&centreY=6109&centreZ=0&zoom=7",
+        )
+        self.assertIn("<t:1780911545:R>", [field.value for field in edit_kwargs["embed"].fields])
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {new_spawn.sighting_key: {"111": self._active_message_record(new_spawn, 222)}}},
+        )
+
+    async def test_process_refreshes_legacy_active_message_without_refresh_marker(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        spawn = module.ImplingSpawn(
+            npcid=8741,
+            world=352,
+            xcoord=3276,
+            ycoord=6109,
+            plane=0,
+            discovered=datetime.fromtimestamp(1_780_911_545, timezone.utc),
+        )
+        edited = []
+
+        class PartialMessage:
+            id = 222
+            embeds = []
+
+            async def edit(self, **kwargs):
+                edited.append(kwargs)
+
+        class Channel:
+            id = 111
+
+            def get_partial_message(self, _message_id):
+                return PartialMessage()
+
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: Channel())
+        legacy_record = self._active_message_record(spawn, 222)
+        legacy_record.pop("message_updated_epoch", None)
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.sighting_key: {"111": legacy_record}}
+        }
+
+        await cog._process_polled_spawns(
+            guild,
+            {"max_age_seconds": 900, "announce_existing": False, "screenshots": False},
+            {"111": [8741]},
+            [spawn],
+        )
+        await self._wait_post_poll_tasks(cog)
+
+        self.assertEqual(len(edited), 1)
+        self.assertEqual(edited[0]["embed"].title, "Crystal Impling spawned")
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}},
+        )
 
     async def test_process_migrates_legacy_active_message_key_for_current_sighting(self):
         module = load_module("implingfinder.implingfinder")
