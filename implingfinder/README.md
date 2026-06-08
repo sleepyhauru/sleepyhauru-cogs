@@ -91,6 +91,7 @@ assigned manually once.
 - `[p]implingset removechannel <#channel>`
 - `[p]implingset list`
 - `[p]implingset screenshots <true|false>`
+- `[p]implingset caughtemoji <emoji>` - default `✅`
 - `[p]implingset endpoint <url>` - must be `https`
 - `[p]implingset resetendpoint`
 - `[p]implingset access add <message_id> <emoji> <role>`
@@ -131,6 +132,14 @@ Each sighting is deduplicated by NPC ID, world, plane, and the official OSRS reg
 The backend can report the same moving impling several times with slightly different coordinates or timestamps, so the cog keeps the newest row for each region and avoids posting older rows from that region as duplicates.
 
 When a tracked sighting is missing from the fresh sightings in the latest successful backend response, the cog edits the Discord message it posted for that sighting to say the impling despawned, keeps the screenshot in the embed, removes the stored active message ID, and deletes the despawn notice 30 seconds later. Messages are kept for retry if Discord rejects the edit because of permissions or a transient API error.
+
+The bot adds a caught reaction to each spawn post. Any non-bot user who can see
+the channel can click that reaction to mark the impling caught; the cog deletes
+that spawn post and removes it from active tracking. Configure the reaction with:
+
+```text
+[p]implingset caughtemoji 🎯
+```
 
 After each successful backend response, new live sightings are posted before despawn and cleanup maintenance. Matching channel sends run concurrently, then post-poll maintenance is queued for a dedicated worker that marks despawns and runs feed cleanup in the background. Recurring feed cleanup is throttled to every 30 seconds per guild and deletes non-pinned bot and human messages from recent channel history when the bot has Manage Messages and Read Message History. Backend failures do not trigger despawn or feed cleanup.
 

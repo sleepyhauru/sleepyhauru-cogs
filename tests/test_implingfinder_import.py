@@ -19,6 +19,7 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cog.config._guild_defaults["puro_enabled"])
         self.assertIsNone(cog.config._guild_defaults["puro_channel"])
         self.assertEqual(cog.config._guild_defaults["access_reactions"], {})
+        self.assertEqual(cog.config._guild_defaults["caught_emoji"], "✅")
         self.assertEqual(cog.config._global_store["seen"], {})
         self.assertEqual(cog.config._global_store["active_messages"], {})
 
@@ -307,6 +308,44 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(attachment_event.send_ms)
         self.assertIsNotNone(attachment_event.end_to_end_ms)
 
+    async def test_send_spawn_adds_configured_caught_reaction(self):
+        module = load_module("implingfinder.implingfinder")
+        guild = types.SimpleNamespace(id=123, name="Impling Hunters")
+        reactions = []
+
+        class Message:
+            id = 999
+
+            async def add_reaction(self, emoji):
+                reactions.append(emoji)
+
+        class Channel:
+            id = 111
+            name = "dragon-imps"
+
+            async def send(self, *args, **kwargs):
+                return Message()
+
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        await cog.config.guild(guild).caught_emoji.set("🎯")
+
+        sent = await cog._send_spawn_to_channel(
+            guild,
+            Channel(),
+            module.ImplingSpawn(
+                npcid=1644,
+                world=489,
+                xcoord=2914,
+                ycoord=3323,
+                plane=0,
+                discovered=datetime.now(timezone.utc),
+            ),
+            screenshots=False,
+        )
+
+        self.assertEqual(sent.id, 999)
+        self.assertEqual(reactions, ["🎯"])
+
     async def test_successful_spawn_post_records_pipeline_timings(self):
         module = load_module("implingfinder.implingfinder")
         cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
@@ -531,6 +570,22 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
                 "#puro-puro will receive Puro-Puro impling posts.",
             ],
         )
+
+    async def test_caught_emoji_command_sets_custom_marker(self):
+        module = load_module("implingfinder.implingfinder")
+        cog = module.ImplingFinder(bot=types.SimpleNamespace(user=None))
+        guild = types.SimpleNamespace(id=123)
+        replies = []
+
+        async def send(message):
+            replies.append(message)
+
+        ctx = types.SimpleNamespace(guild=guild, send=send)
+
+        await cog.implingset_caughtemoji(ctx, "🎯")
+
+        self.assertEqual(await cog.config.guild(guild).caught_emoji(), "🎯")
+        self.assertEqual(replies, ["Caught reaction emoji set to `🎯`."])
 
     async def test_access_commands_store_list_and_remove_mapping(self):
         module = load_module("implingfinder.implingfinder")
@@ -785,6 +840,171 @@ class CogImportTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(calls, [])
+
+    async def test_caught_reaction_deletes_active_spawn_and_removes_tracking(self):
+        module = load_module("implingfinder.implingfinder")
+        deleted = []
+        spawn = module.ImplingSpawn(
+            npcid=8741,
+            world=524,
+            xcoord=2202,
+            ycoord=3350,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+
+        class PartialMessage:
+            async def delete(self):
+                deleted.append(222)
+
+        class Channel:
+            id = 111
+
+            def get_partial_message(self, message_id):
+                self.message_id = message_id
+                return PartialMessage()
+
+        channel = Channel()
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: channel)
+        bot = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == 123 else None,
+        )
+        cog = module.ImplingFinder(bot=bot)
+        await cog.config.guild(guild).caught_emoji.set("🎯")
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}
+        }
+
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(
+                guild_id=123,
+                channel_id=111,
+                message_id=222,
+                user_id=42,
+                emoji="🎯",
+                member=types.SimpleNamespace(id=42, bot=False),
+            )
+        )
+
+        self.assertEqual(deleted, [222])
+        self.assertEqual(channel.message_id, 222)
+        self.assertEqual(cog.config._global_store["active_messages"], {})
+
+    async def test_caught_reaction_ignores_bots_wrong_emoji_and_untracked_messages(self):
+        module = load_module("implingfinder.implingfinder")
+        deleted = []
+        spawn = module.ImplingSpawn(
+            npcid=8741,
+            world=524,
+            xcoord=2202,
+            ycoord=3350,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+
+        class PartialMessage:
+            async def delete(self):
+                deleted.append(222)
+
+        class Channel:
+            def get_partial_message(self, _message_id):
+                return PartialMessage()
+
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: Channel())
+        bot = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == 123 else None,
+        )
+        cog = module.ImplingFinder(bot=bot)
+        await cog.config.guild(guild).caught_emoji.set("🎯")
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}
+        }
+
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(
+                guild_id=123,
+                channel_id=111,
+                message_id=222,
+                user_id=999,
+                emoji="🎯",
+                member=types.SimpleNamespace(id=999, bot=True),
+            )
+        )
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(
+                guild_id=123,
+                channel_id=111,
+                message_id=222,
+                user_id=42,
+                emoji="❌",
+                member=types.SimpleNamespace(id=42, bot=False),
+            )
+        )
+        await cog.on_raw_reaction_add(
+            types.SimpleNamespace(
+                guild_id=123,
+                channel_id=111,
+                message_id=999,
+                user_id=42,
+                emoji="🎯",
+                member=types.SimpleNamespace(id=42, bot=False),
+            )
+        )
+
+        self.assertEqual(deleted, [])
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}},
+        )
+
+    async def test_caught_reaction_keeps_tracking_when_delete_fails(self):
+        module = load_module("implingfinder.implingfinder")
+        spawn = module.ImplingSpawn(
+            npcid=8741,
+            world=524,
+            xcoord=2202,
+            ycoord=3350,
+            plane=0,
+            discovered=datetime.now(timezone.utc),
+        )
+
+        class PartialMessage:
+            async def delete(self):
+                raise module.discord.Forbidden()
+
+        class Channel:
+            def get_partial_message(self, _message_id):
+                return PartialMessage()
+
+        guild = types.SimpleNamespace(id=123, get_channel=lambda channel_id: Channel())
+        bot = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == 123 else None,
+        )
+        cog = module.ImplingFinder(bot=bot)
+        await cog.config.guild(guild).caught_emoji.set("🎯")
+        cog.config._global_store["active_messages"] = {
+            "123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}
+        }
+
+        with self.assertLogs("red.implingfinder", level="WARNING"):
+            await cog.on_raw_reaction_add(
+                types.SimpleNamespace(
+                    guild_id=123,
+                    channel_id=111,
+                    message_id=222,
+                    user_id=42,
+                    emoji="🎯",
+                    member=types.SimpleNamespace(id=42, bot=False),
+                )
+            )
+
+        self.assertEqual(
+            cog.config._global_store["active_messages"],
+            {"123": {spawn.sighting_key: {"111": self._active_message_record(spawn, 222)}}},
+        )
 
     async def test_embed_uses_spawned_title_as_map_link_without_coordinate_field(self):
         module = load_module("implingfinder.implingfinder")

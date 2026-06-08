@@ -70,6 +70,7 @@ SCREENSHOT_QUEUE_SIZE = 128
 MAINTENANCE_WORKER_COUNT = 1
 MAINTENANCE_QUEUE_SIZE = 256
 ACCESS_ROLE_REASON = "ImplingFinder access reaction"
+DEFAULT_CAUGHT_EMOJI = "✅"
 CUSTOM_EMOJI_RE = re.compile(r"^<(a?):([A-Za-z0-9_]+):(\d+)>$")
 
 
@@ -127,6 +128,7 @@ class ImplingFinder(commands.Cog):
             puro_enabled=False,
             puro_channel=None,
             access_reactions={},
+            caught_emoji=DEFAULT_CAUGHT_EMOJI,
         )
         self.config.register_global(seen={}, active_messages={})
 
@@ -1411,11 +1413,159 @@ class ImplingFinder(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload) -> None:
+        if await self._handle_caught_reaction(payload):
+            return
         await self._handle_access_reaction(payload, add=True)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload) -> None:
         await self._handle_access_reaction(payload, add=False)
+
+    async def _handle_caught_reaction(self, payload) -> bool:
+        guild_id = getattr(payload, "guild_id", None)
+        channel_id = getattr(payload, "channel_id", None)
+        message_id = getattr(payload, "message_id", None)
+        user_id = getattr(payload, "user_id", None)
+        if guild_id is None or message_id is None or user_id is None:
+            return False
+        try:
+            clean_guild_id = int(guild_id)
+            clean_message_id = int(message_id)
+            clean_user_id = int(user_id)
+        except (TypeError, ValueError):
+            return False
+
+        bot_user = getattr(self.bot, "user", None)
+        if getattr(bot_user, "id", None) == clean_user_id:
+            return False
+        member = getattr(payload, "member", None)
+        if bool(getattr(member, "bot", False)):
+            return False
+
+        emoji_key = self._access_emoji_key(getattr(payload, "emoji", ""))
+        caught_emoji = await self._caught_emoji_for_guild_id(clean_guild_id)
+        if emoji_key != caught_emoji:
+            return False
+
+        active_match = await self._active_message_match(
+            clean_guild_id,
+            channel_id,
+            clean_message_id,
+        )
+        if active_match is None:
+            return False
+        spawn_key, tracked_channel_id, tracked_message_id = active_match
+
+        get_guild = getattr(self.bot, "get_guild", None)
+        guild = get_guild(clean_guild_id) if get_guild is not None else None
+        if guild is None:
+            log.warning(
+                "Impling Finder caught reaction matched guild %s but the guild was unavailable",
+                guild_id,
+            )
+            return True
+
+        channel = guild.get_channel(int(tracked_channel_id))
+        if channel is None:
+            log.warning(
+                "Impling Finder cannot delete caught impling message %s; channel %s is missing",
+                tracked_message_id,
+                tracked_channel_id,
+            )
+            return True
+
+        try:
+            if hasattr(channel, "get_partial_message"):
+                message = channel.get_partial_message(int(tracked_message_id))
+            else:
+                message = await channel.fetch_message(int(tracked_message_id))
+            await message.delete()
+        except discord.NotFound:
+            await self._remove_active_message(
+                clean_guild_id,
+                spawn_key,
+                tracked_channel_id,
+                tracked_message_id,
+            )
+            return True
+        except discord.Forbidden:
+            log.warning(
+                "Impling Finder lacks permission to delete caught impling message %s in channel %s",
+                tracked_message_id,
+                tracked_channel_id,
+            )
+            return True
+        except discord.HTTPException:
+            log.exception(
+                "Impling Finder failed to delete caught impling message %s in channel %s",
+                tracked_message_id,
+                tracked_channel_id,
+            )
+            return True
+
+        await self._remove_active_message(
+            clean_guild_id,
+            spawn_key,
+            tracked_channel_id,
+            tracked_message_id,
+        )
+        return True
+
+    async def _active_message_match(
+        self,
+        guild_id: int,
+        channel_id: Any,
+        message_id: int,
+    ) -> Optional[tuple[str, str, int]]:
+        try:
+            clean_channel_id = str(int(channel_id)) if channel_id is not None else None
+            clean_message_id = int(message_id)
+        except (TypeError, ValueError):
+            return None
+
+        active_messages = await self.config.active_messages()
+        guild_messages = active_messages.get(str(int(guild_id)))
+        if not isinstance(guild_messages, dict):
+            return None
+
+        for spawn_key, channel_messages in guild_messages.items():
+            if not isinstance(channel_messages, dict):
+                continue
+            for tracked_channel_id, message_record in channel_messages.items():
+                try:
+                    stored_channel_id = str(int(tracked_channel_id))
+                except (TypeError, ValueError):
+                    continue
+                if clean_channel_id is not None and stored_channel_id != clean_channel_id:
+                    continue
+                tracked_message_id = self._tracked_message_id(message_record)
+                if tracked_message_id == clean_message_id:
+                    return str(spawn_key), stored_channel_id, clean_message_id
+        return None
+
+    async def _remove_active_message(
+        self,
+        guild_id: int,
+        spawn_key: str,
+        channel_id: str,
+        message_id: int,
+    ) -> None:
+        guild_key = str(int(guild_id))
+        async with self.config.active_messages() as active_messages:
+            guild_messages = active_messages.get(guild_key)
+            if not isinstance(guild_messages, dict):
+                return
+            channel_messages = guild_messages.get(spawn_key)
+            if not isinstance(channel_messages, dict):
+                return
+            message_record = channel_messages.get(channel_id)
+            if self._tracked_message_id(message_record) != int(message_id):
+                return
+            channel_messages.pop(channel_id, None)
+            if not channel_messages:
+                guild_messages.pop(spawn_key, None)
+            if not guild_messages:
+                active_messages.pop(guild_key, None)
 
     async def _handle_access_reaction(self, payload, *, add: bool) -> None:
         guild_id = getattr(payload, "guild_id", None)
@@ -1535,6 +1685,16 @@ class ImplingFinder(commands.Cog):
             return str(int(settings.get("puro_channel")))
         except (TypeError, ValueError):
             return None
+
+    async def _caught_emoji_for_guild(self, guild: discord.Guild) -> str:
+        return await self._caught_emoji_for_guild_id(int(guild.id))
+
+    async def _caught_emoji_for_guild_id(self, guild_id: int) -> str:
+        try:
+            raw_emoji = await self.config.guild_from_id(int(guild_id)).caught_emoji()
+        except AttributeError:
+            raw_emoji = DEFAULT_CAUGHT_EMOJI
+        return self._access_emoji_key(raw_emoji) or DEFAULT_CAUGHT_EMOJI
 
     def _access_emoji_key(self, emoji: Any) -> str:
         emoji_id = getattr(emoji, "id", None)
@@ -1828,6 +1988,7 @@ class ImplingFinder(commands.Cog):
                 render_ms=render_ms,
                 send_ms=send_ms,
             )
+            await self._add_caught_reaction(guild, channel, message)
             if should_edit_screenshot:
                 self._enqueue_screenshot_edit(
                     guild,
@@ -1881,6 +2042,38 @@ class ImplingFinder(commands.Cog):
                 error_category="discord_http",
             )
             return None
+
+    async def _add_caught_reaction(
+        self,
+        guild: discord.Guild,
+        channel,
+        message: discord.Message,
+    ) -> None:
+        permissions = self._bot_permissions(guild, channel)
+        if permissions is not None and not getattr(permissions, "add_reactions", True):
+            log.warning(
+                "Impling Finder cannot add caught reaction in channel %s for guild %s",
+                getattr(channel, "id", "?"),
+                guild.id,
+            )
+            return
+
+        try:
+            emoji = await self._caught_emoji_for_guild(guild)
+            add_reaction = getattr(message, "add_reaction", None)
+            if add_reaction is None:
+                return
+            await add_reaction(emoji)
+        except discord.Forbidden:
+            log.warning(
+                "Impling Finder was denied while adding caught reaction in channel %s",
+                getattr(channel, "id", "?"),
+            )
+        except discord.HTTPException:
+            log.exception(
+                "Impling Finder failed to add caught reaction in channel %s",
+                getattr(channel, "id", "?"),
+            )
 
     async def _edit_spawn_message_with_screenshot(
         self,
@@ -2371,6 +2564,7 @@ class ImplingFinder(commands.Cog):
             f"Map screenshots: `{bool(settings.get('screenshots'))}`",
             f"Puro-Puro: `{bool(settings.get('puro_enabled', False))}`",
             f"Puro-Puro channel: `{puro_channel_display}`",
+            f"Caught reaction: `{settings.get('caught_emoji', DEFAULT_CAUGHT_EMOJI)}`",
             f"Endpoint: `{settings.get('endpoint', DEFAULT_ENDPOINT)}`",
         ]
         if not channels:
@@ -2433,6 +2627,18 @@ class ImplingFinder(commands.Cog):
             return
         await self.config.guild(ctx.guild).max_age_seconds.set(seconds)
         await ctx.send(f"Max spawn age set to `{seconds}s`.")
+
+    @implingset.command(name="caughtemoji")
+    @commands.guild_only()
+    @commands.admin_or_permissions(manage_guild=True)
+    async def implingset_caughtemoji(self, ctx: commands.Context, emoji: str) -> None:
+        """Set the reaction emoji users click to mark a spawn caught."""
+        emoji_key = self._access_emoji_key(emoji)
+        if not emoji_key:
+            await ctx.send("Provide a valid caught reaction emoji.")
+            return
+        await self.config.guild(ctx.guild).caught_emoji.set(emoji_key)
+        await ctx.send(f"Caught reaction emoji set to `{emoji_key}`.")
 
     @implingset.command(name="addchannel")
     @commands.guild_only()
